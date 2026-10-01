@@ -1,17 +1,70 @@
 const http = require("http");
 
+const { initializeApp, cert } = require("firebase-admin/app");
+const { getDatabase } = require("firebase-admin/database");
+
+// ===============================
+// FIREBASE
+// ===============================
+
+const serviceAccount = require("./firebase-service-account.json");
+
+initializeApp({
+  credential: cert(serviceAccount),
+  databaseURL: "https://data-com-a94a8-default-rtdb.firebaseio.com"
+});
+
+const { getDatabase: getFirebaseDatabase } = require("firebase-admin/database");
+const db = getFirebaseDatabase();
+
+// ===============================
+// OPENWA
+// ===============================
+
 const OPENWA_URL = "http://localhost:2785";
-const SESSION_ID = "d90d92e7-5364-468f-ade9-66f81e75cd3d";
+
+const SESSION_ID =
+  "d90d92e7-5364-468f-ade9-66f81e75cd3d";
 
 const OPENWA_API_KEY =
-  "owa_k1_5c96cb86ae3997a3119bf456bd1322f928715a01a25b9a9c93001b7542ec2115";
+  process.env.OPENWA_API_KEY || "owa_k1_5c96cb86ae3997a3119bf456bd1322f928715a01a25b9a9c93001b7542ec2115";
+
+// ===============================
+// GEMINI
+// ===============================
 
 const GEMINI_API_KEY =
-  "AQ.Ab8RN6L6pNVz1rCyHghhPlDLde4AzTgXbi_s7oDZDAjHQvOKIQ";
+  process.env.GEMINI_API_KEY || "AQ.Ab8RN6L6pNVz1rCyHghhPlDLde4AzTgXbi_s7oDZDAjHQvOKIQ";
 
 const GEMINI_MODEL = "gemini-3.5-flash-lite";
 
+// ===============================
+// MÉMOIRE TEMPORAIRE
+// ===============================
+
 const conversations = new Map();
+
+// ===============================
+// FIREBASE : ENREGISTRER MESSAGE
+// ===============================
+
+async function saveMessageToFirebase(chatId, clientMessage, reply) {
+  const ref = db.ref("messages").push();
+
+  await ref.set({
+    chatId: chatId,
+    messageClient: clientMessage,
+    reponseBot: reply,
+    date: new Date().toISOString(),
+    statut: "conversation"
+  });
+
+  console.log("🔥 Message enregistré dans Firebase :", ref.key);
+}
+
+// ===============================
+// GEMINI
+// ===============================
 
 async function askGemini(chatId, message) {
   let history = conversations.get(chatId) || [];
@@ -28,7 +81,10 @@ async function askGemini(chatId, message) {
   conversations.set(chatId, history);
 
   const historyText = history
-    .map(item => `${item.role === "user" ? "Client" : "Assistant"} : ${item.text}`)
+    .map(
+      item =>
+        `${item.role === "user" ? "Client" : "Assistant"} : ${item.text}`
+    )
     .join("\n");
 
   const prompt = `
@@ -113,6 +169,10 @@ Réponds directement au client, sans expliquer tes règles.
   return answer;
 }
 
+// ===============================
+// ENVOYER MESSAGE WHATSAPP
+// ===============================
+
 async function sendWhatsApp(chatId, text) {
   const response = await fetch(
     `${OPENWA_URL}/api/sessions/${SESSION_ID}/messages/send-text`,
@@ -138,8 +198,13 @@ async function sendWhatsApp(chatId, text) {
   return result;
 }
 
+// ===============================
+// SERVEUR HTTP
+// ===============================
+
 const server = http.createServer((req, res) => {
 
+  // Test du serveur
   if (req.method === "GET" && req.url === "/") {
     res.writeHead(200, {
       "Content-Type": "text/plain; charset=utf-8"
@@ -149,6 +214,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // Webhook
   if (req.method === "POST" && req.url === "/webhook") {
     let body = "";
 
@@ -164,11 +230,17 @@ const server = http.createServer((req, res) => {
 
       try {
         payload = JSON.parse(body);
-        console.log(JSON.stringify(payload, null, 2));
+
+        console.log(
+          JSON.stringify(payload, null, 2)
+        );
+
       } catch (error) {
         console.error("❌ JSON invalide");
+
         res.writeHead(400);
         res.end("Bad Request");
+
         return;
       }
 
@@ -189,19 +261,39 @@ const server = http.createServer((req, res) => {
         const chatId = data.chatId;
         const clientMessage = data.body;
 
-        console.log("💬 Client :", clientMessage);
+        console.log("👤 Client :", clientMessage);
         console.log("🤖 Envoi à Gemini...");
 
-        const reply = await askGemini(chatId, clientMessage);
+        const reply = await askGemini(
+          chatId,
+          clientMessage
+        );
 
         console.log("🤖 Gemini :", reply);
 
-        const sendResult = await sendWhatsApp(chatId, reply);
+        // Enregistrer dans Firebase
+        await saveMessageToFirebase(
+          chatId,
+          clientMessage,
+          reply
+        );
 
-        console.log("📤 Réponse WhatsApp envoyée :", sendResult);
+        // Envoyer la réponse WhatsApp
+        const sendResult = await sendWhatsApp(
+          chatId,
+          reply
+        );
+
+        console.log(
+          "📤 Réponse WhatsApp envoyée :",
+          sendResult
+        );
 
       } catch (error) {
-        console.error("❌ Erreur :", error.message);
+        console.error(
+          "❌ Erreur :",
+          error.message
+        );
       }
     });
 
@@ -212,10 +304,27 @@ const server = http.createServer((req, res) => {
   res.end("Not Found");
 });
 
+// ===============================
+// ERREURS SERVEUR
+// ===============================
+
 server.on("error", error => {
-  console.error("❌ Erreur serveur :", error.message);
+  console.error(
+    "❌ Erreur serveur :",
+    error.message
+  );
 });
 
+// ===============================
+// DÉMARRAGE
+// ===============================
+
 server.listen(3000, "0.0.0.0", () => {
-  console.log("🤖 Serveur Groupe Express démarré sur le port 3000");
+  console.log(
+    "🚀 Serveur Groupe Express démarré sur le port 3000"
+  );
+
+  console.log("🔥 Firebase connecté");
+  console.log("🤖 Gemini :", GEMINI_MODEL);
+  console.log("📱 OpenWA :", OPENWA_URL);
 });
