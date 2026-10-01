@@ -38,10 +38,12 @@ async function askGemini(message) {
             parts: [
               {
                 text:
-                  "Tu es l'assistant officiel de Groupe Express, une entreprise de vente et livraison de repas. " +
-                  "Réponds toujours en français, de manière polie, naturelle, simple, chaleureuse et concise. " +
-                  "N'invente jamais un plat, un prix ou une disponibilité.\n\n" +
-                  "Message du client : " +
+                  "Tu es l'assistant officiel de Groupe Express, une entreprise de vente et livraison de repas.\n\n" +
+                  "Réponds toujours en français, de manière polie, naturelle, simple, chaleureuse et concise.\n" +
+                  "Tu peux utiliser occasionnellement les emojis 🍽️📦😊.\n" +
+                  "N'invente jamais un plat, un prix, une disponibilité ou une information.\n" +
+                  "Si une information n'est pas connue, indique simplement qu'elle doit être vérifiée.\n\n" +
+                  "Message du client :\n" +
                   message
               }
             ]
@@ -67,33 +69,56 @@ async function askGemini(message) {
 
 module.exports = async function handler(req, res) {
   try {
-    if (req.method !== "POST") {
+    // Vérification de l'API
+    if (req.method === "GET") {
       return res.status(200).json({
         status: "ok",
-        message: "API Groupe Express + Gemini opérationnelle 🚀"
+        message: "API Groupe Express opérationnelle 🚀"
       });
     }
 
-    const message = req.body?.message;
+    // OpenWA envoie les événements avec POST
+    if (req.method === "POST") {
+      console.log("=== WEBHOOK OPENWA ===");
+      console.log(JSON.stringify(req.body, null, 2));
 
-    if (!message) {
-      return res.status(400).json({
-        status: "error",
-        message: "Le champ 'message' est obligatoire."
+      const body = req.body || {};
+
+      // Recherche du message reçu dans différentes structures possibles
+      const message =
+        body.message ||
+        body.data?.message ||
+        body.data ||
+        body;
+
+      console.log("Message reçu :", JSON.stringify(message, null, 2));
+
+      // Si c'est simplement un test avec {message:"..."}
+      if (typeof body.message === "string") {
+        const reply = await askGemini(body.message);
+
+        return res.status(200).json({
+          status: "ok",
+          reply
+        });
+      }
+
+      // Pour OpenWA : on accuse réception du webhook
+      return res.status(200).json({
+        status: "ok",
+        received: true
       });
     }
 
-    const reply = await askGemini(message);
-
-    res.status(200).json({
-      status: "ok",
-      reply
+    return res.status(405).json({
+      status: "error",
+      message: "Méthode non autorisée"
     });
 
   } catch (error) {
-    console.error("Erreur :", error);
+    console.error("Erreur API :", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       status: "error",
       message: error.message
     });
