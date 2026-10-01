@@ -13,7 +13,10 @@ if (getApps().length === 0) {
 const db = getDatabase();
 
 async function getGeminiKey() {
-  const snapshot = await db.ref("server_config/gemini_keys/0").once("value");
+  const snapshot = await db
+    .ref("server_config/gemini_keys/0")
+    .once("value");
+
   return snapshot.val();
 }
 
@@ -67,9 +70,43 @@ async function askGemini(message) {
   );
 }
 
+async function sendWhatsAppMessage(chatId, text) {
+  const baseUrl = process.env.OPENWA_PUBLIC_URL;
+  const sessionId = process.env.OPENWA_SESSION_ID;
+  const apiKey = process.env.OPENWA_API_KEY;
+
+  if (!baseUrl || !sessionId || !apiKey) {
+    throw new Error("Configuration OpenWA manquante dans Vercel");
+  }
+
+  const response = await fetch(
+    `${baseUrl}/api/sessions/${sessionId}/messages/send-text`,
+    {
+      method: "POST",
+      headers: {
+        "X-API-Key": apiKey,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        chatId,
+        text
+      })
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(
+      data.message || data.error || "Impossible d'envoyer le message WhatsApp"
+    );
+  }
+
+  return data;
+}
+
 module.exports = async function handler(req, res) {
   try {
-    // Vérification de l'API
     if (req.method === "GET") {
       return res.status(200).json({
         status: "ok",
@@ -77,42 +114,85 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // OpenWA envoie les événements avec POST
-    if (req.method === "POST") {
-      console.log("=== WEBHOOK OPENWA ===");
-      console.log(JSON.stringify(req.body, null, 2));
-
-      const body = req.body || {};
-
-      // Recherche du message reçu dans différentes structures possibles
-      const message =
-        body.message ||
-        body.data?.message ||
-        body.data ||
-        body;
-
-      console.log("Message reçu :", JSON.stringify(message, null, 2));
-
-      // Si c'est simplement un test avec {message:"..."}
-      if (typeof body.message === "string") {
-        const reply = await askGemini(body.message);
-
-        return res.status(200).json({
-          status: "ok",
-          reply
-        });
-      }
-
-      // Pour OpenWA : on accuse réception du webhook
-      return res.status(200).json({
-        status: "ok",
-        received: true
+    if (req.method !== "POST") {
+      return res.status(405).json({
+        status: "error",
+        message: "Méthode non autorisée"
       });
     }
 
-    return res.status(405).json({
-      status: "error",
-      message: "Méthode non autorisée"
+    console.log("=== WEBHOOK OPENWA ===");
+    console.log(JSON.stringify(req.body, null, 2));
+
+    const body = req.body || {};
+
+    const incoming =
+      body.message ||
+      body.data?.message ||
+      body.data ||
+      body;
+
+    console.log(
+      "Message reçu :",
+      JSON.stringify(incoming, null, 2)
+    );
+
+    // Test direct depuis l'API
+    if (typeof body.message === "string") {
+      const reply = await askGemini(body.message);
+
+      return res.status(200).json({
+        status: "ok",
+        reply
+      });
+    }
+
+    // Ignore les messages envoyés par le propre compte du bot
+    if (incoming.fromMe === true) {
+      return res.status(200).json({
+        status: "ok",
+        ignored: "fromMe"
+      });
+    }
+
+    const chatId = incoming.chatId;
+    const messageText = incoming.body;
+
+    // On ne traite que les messages texte
+    if (
+      !chatId ||
+      !messageText ||
+      incoming.type !== "text"
+    ) {
+      return res.status(200).json({
+        status: "ok",
+        ignored: true
+      });
+    }
+
+    console.log("Chat ID :", chatId);
+    console.log("Texte :", messageText);
+
+    // Demande une réponse à Gemini
+    const reply = await askGemini(messageText);
+
+    console.log("Réponse Gemini :", reply);
+
+    // Envoie la réponse sur WhatsApp
+    const sent = await sendWhatsAppMessage(
+      chatId,
+      reply
+    );
+
+    console.log(
+      "Message WhatsApp envoyé :",
+      JSON.stringify(sent)
+    );
+
+    return res.status(200).json({
+      status: "ok",
+      reply,
+      sent: true
     });
 
   } catch (error) {
