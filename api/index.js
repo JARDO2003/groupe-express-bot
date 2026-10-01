@@ -1,4 +1,4 @@
-import admin from "firebase-admin";
+const admin = require("firebase-admin");
 
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -11,9 +11,10 @@ if (!admin.apps.length) {
 
 const db = admin.database();
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   try {
     const ref = db.ref("test_vercel");
+
     await ref.set({
       message: "Connexion Firebase depuis Vercel réussie",
       date: new Date().toISOString()
@@ -26,7 +27,7 @@ export default async function handler(req, res) {
     });
 
   } catch (error) {
-    console.error(error);
+    console.error("Erreur Firebase :", error);
 
     res.status(500).json({
       status: "error",
@@ -34,4 +35,4 @@ export default async function handler(req, res) {
       message: error.message
     });
   }
-}
+};
