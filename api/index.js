@@ -1,15 +1,16 @@
-const admin = require("firebase-admin");
+const { initializeApp, cert, getApps } = require("firebase-admin/app");
+const { getDatabase } = require("firebase-admin/database");
 
-if (!admin.apps.length) {
+if (getApps().length === 0) {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
+  initializeApp({
+    credential: cert(serviceAccount),
     databaseURL: process.env.FIREBASE_DATABASE_URL
   });
 }
 
-const db = admin.database();
+const db = getDatabase();
 
 module.exports = async function handler(req, res) {
   try {
