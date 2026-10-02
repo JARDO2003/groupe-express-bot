@@ -14,8 +14,7 @@ initializeApp({
   databaseURL: "https://data-com-a94a8-default-rtdb.firebaseio.com"
 });
 
-const { getDatabase: getFirebaseDatabase } = require("firebase-admin/database");
-const db = getFirebaseDatabase();
+const db = getDatabase();
 
 // ===============================
 // OPENWA
@@ -24,7 +23,7 @@ const db = getFirebaseDatabase();
 const OPENWA_URL = "http://localhost:2785";
 
 const SESSION_ID =
-  "d90d92e7-5364-468f-ade9-66f81e75cd3d";
+  "5967a046-6d1c-4506-a11b-0c28d8f71ba0";
 
 const OPENWA_API_KEY =
   process.env.OPENWA_API_KEY || "owa_k1_5c96cb86ae3997a3119bf456bd1322f928715a01a25b9a9c93001b7542ec2115";
@@ -48,7 +47,11 @@ const conversations = new Map();
 // FIREBASE : ENREGISTRER MESSAGE
 // ===============================
 
-async function saveMessageToFirebase(chatId, clientMessage, reply) {
+async function saveMessageToFirebase(
+  chatId,
+  clientMessage,
+  reply
+) {
   const ref = db.ref("messages").push();
 
   await ref.set({
@@ -59,7 +62,10 @@ async function saveMessageToFirebase(chatId, clientMessage, reply) {
     statut: "conversation"
   });
 
-  console.log("🔥 Message enregistré dans Firebase :", ref.key);
+  console.log(
+    "🔥 Message enregistré dans Firebase :",
+    ref.key
+  );
 }
 
 // ===============================
@@ -148,7 +154,8 @@ Réponds directement au client, sans expliquer tes règles.
 
   if (!response.ok) {
     throw new Error(
-      result?.error?.message || `Gemini HTTP ${response.status}`
+      result?.error?.message ||
+        `Gemini HTTP ${response.status}`
     );
   }
 
@@ -156,7 +163,9 @@ Réponds directement au client, sans expliquer tes règles.
     result?.candidates?.[0]?.content?.parts?.[0]?.text;
 
   if (!answer) {
-    throw new Error("Gemini n'a retourné aucune réponse.");
+    throw new Error(
+      "Gemini n'a retourné aucune réponse."
+    );
   }
 
   history.push({
@@ -202,129 +211,206 @@ async function sendWhatsApp(chatId, text) {
 // SERVEUR HTTP
 // ===============================
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(
+  (req, res) => {
 
-  // Test du serveur
-  if (req.method === "GET" && req.url === "/") {
-    res.writeHead(200, {
-      "Content-Type": "text/plain; charset=utf-8"
-    });
+    // Test serveur
+    if (
+      req.method === "GET" &&
+      req.url === "/"
+    ) {
+      res.writeHead(200, {
+        "Content-Type":
+          "text/plain; charset=utf-8"
+      });
 
-    res.end("Groupe Express Bot fonctionne !");
-    return;
-  }
+      res.end(
+        "Groupe Express Bot fonctionne !"
+      );
 
-  // Webhook
-  if (req.method === "POST" && req.url === "/webhook") {
-    let body = "";
+      return;
+    }
 
-    req.on("data", chunk => {
-      body += chunk.toString();
-    });
+    // Webhook
+    if (
+      req.method === "POST" &&
+      req.url === "/webhook"
+    ) {
 
-    req.on("end", async () => {
+      let body = "";
 
-      console.log("\n📩 MESSAGE WHATSAPP REÇU");
-
-      let payload;
-
-      try {
-        payload = JSON.parse(body);
-
-        console.log(
-          JSON.stringify(payload, null, 2)
-        );
-
-      } catch (error) {
-        console.error("❌ JSON invalide");
-
-        res.writeHead(400);
-        res.end("Bad Request");
-
-        return;
-      }
-
-      res.writeHead(200);
-      res.end("OK");
-
-      try {
-        const data = payload.data;
-
-        if (!data || data.fromMe || !data.chatId) {
-          return;
+      req.on(
+        "data",
+        chunk => {
+          body += chunk.toString();
         }
+      );
 
-        if (data.type !== "text" || !data.body) {
-          return;
+      req.on(
+        "end",
+        async () => {
+
+          console.log(
+            "\n📩 MESSAGE WHATSAPP REÇU"
+          );
+
+          let payload;
+
+          try {
+
+            payload = JSON.parse(body);
+
+            console.log(
+              JSON.stringify(
+                payload,
+                null,
+                2
+              )
+            );
+
+          } catch (error) {
+
+            console.error(
+              "❌ JSON invalide"
+            );
+
+            res.writeHead(400);
+            res.end(
+              "Bad Request"
+            );
+
+            return;
+          }
+
+          res.writeHead(200);
+          res.end("OK");
+
+          try {
+
+            const data =
+              payload.data;
+
+            if (
+              !data ||
+              data.fromMe ||
+              !data.chatId
+            ) {
+              return;
+            }
+
+            if (
+              data.type !== "text" ||
+              !data.body
+            ) {
+              return;
+            }
+
+            const chatId =
+              data.chatId;
+
+            const clientMessage =
+              data.body;
+
+            console.log(
+              "👤 Client :",
+              clientMessage
+            );
+
+            console.log(
+              "🤖 Envoi à Gemini..."
+            );
+
+            const reply =
+              await askGemini(
+                chatId,
+                clientMessage
+              );
+
+            console.log(
+              "🤖 Gemini :",
+              reply
+            );
+
+            // Firebase
+            await saveMessageToFirebase(
+              chatId,
+              clientMessage,
+              reply
+            );
+
+            // WhatsApp
+            const sendResult =
+              await sendWhatsApp(
+                chatId,
+                reply
+              );
+
+            console.log(
+              "📤 Réponse WhatsApp envoyée :",
+              sendResult
+            );
+
+          } catch (error) {
+
+            console.error(
+              "❌ Erreur :",
+              error.message
+            );
+
+          }
         }
+      );
 
-        const chatId = data.chatId;
-        const clientMessage = data.body;
+      return;
+    }
 
-        console.log("👤 Client :", clientMessage);
-        console.log("🤖 Envoi à Gemini...");
-
-        const reply = await askGemini(
-          chatId,
-          clientMessage
-        );
-
-        console.log("🤖 Gemini :", reply);
-
-        // Enregistrer dans Firebase
-        await saveMessageToFirebase(
-          chatId,
-          clientMessage,
-          reply
-        );
-
-        // Envoyer la réponse WhatsApp
-        const sendResult = await sendWhatsApp(
-          chatId,
-          reply
-        );
-
-        console.log(
-          "📤 Réponse WhatsApp envoyée :",
-          sendResult
-        );
-
-      } catch (error) {
-        console.error(
-          "❌ Erreur :",
-          error.message
-        );
-      }
-    });
-
-    return;
+    res.writeHead(404);
+    res.end("Not Found");
   }
-
-  res.writeHead(404);
-  res.end("Not Found");
-});
+);
 
 // ===============================
-// ERREURS SERVEUR
+// ERREURS
 // ===============================
 
-server.on("error", error => {
-  console.error(
-    "❌ Erreur serveur :",
-    error.message
-  );
-});
+server.on(
+  "error",
+  error => {
+
+    console.error(
+      "❌ Erreur serveur :",
+      error.message
+    );
+
+  }
+);
 
 // ===============================
 // DÉMARRAGE
 // ===============================
 
-server.listen(3000, "0.0.0.0", () => {
-  console.log(
-    "🚀 Serveur Groupe Express démarré sur le port 3000"
-  );
+server.listen(
+  3000,
+  "0.0.0.0",
+  () => {
 
-  console.log("🔥 Firebase connecté");
-  console.log("🤖 Gemini :", GEMINI_MODEL);
-  console.log("📱 OpenWA :", OPENWA_URL);
-});
+    console.log(
+      "🚀 Serveur Groupe Express démarré sur le port 3000"
+    );
+
+    console.log(
+      "🔥 Firebase connecté"
+    );
+
+    console.log(
+      "🤖 Gemini :",
+      GEMINI_MODEL
+    );
+
+    console.log(
+      "📱 OpenWA :",
+      OPENWA_URL
+    );
+
+  }
+);
