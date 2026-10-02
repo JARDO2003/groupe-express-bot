@@ -1,4 +1,5 @@
 const http = require("http");
+const crypto = require("crypto");
 
 const { initializeApp, cert } = require("firebase-admin/app");
 const { getDatabase } = require("firebase-admin/database");
@@ -113,6 +114,8 @@ function trouverPlat(texte) {
   return null;
 }
 
+const MOTS_IGNORES = ["ok", "oui", "non", "merci", "svp", "stp"];
+
 function extraireInfos(texte) {
   let contact = null;
   let reste = texte;
@@ -138,8 +141,12 @@ function extraireInfos(texte) {
     .replace(/\s+/g, " ")
     .trim();
 
-  const mots = reste.split(" ").filter(m => m.length >= 2);
-  const nom = mots.length >= 2 ? mots.join(" ") : null;
+  const mots = reste
+    .split(" ")
+    .filter(m => m.length >= 2 && !MOTS_IGNORES.includes(normaliser(m)));
+
+  // Un seul nom suffit ; l'ordre nom / numéro n'a pas d'importance
+  const nom = mots.length >= 1 ? mots.join(" ") : null;
 
   return { nom, contact };
 }
@@ -173,21 +180,49 @@ async function saveMessageToFirebase(chatId, clientMessage, reply) {
 // FIRESTORE : COMMANDES
 // ===============================
 
-async function enregistrerCommande(chatId, plat, nomComplet, contact) {
-  const ref = await firestore.collection("commandes").add({
-    chatId: chatId,
-    plat: plat.nom,
-    lettre: plat.lettre,
-    prix: PRIX,
-    nomComplet: nomComplet,
-    contact: contact,
-    jour: dateJour(),
-    date: new Date().toISOString(),
-    statut: "en_attente"
-  });
+const ALPHABET_CODE = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 
-  console.log("🧾 Commande enregistrée dans Firestore :", ref.id);
-  return ref.id;
+function genererCode() {
+  let suffixe = "";
+
+  for (let i = 0; i < 4; i++) {
+    suffixe += ALPHABET_CODE[crypto.randomInt(ALPHABET_CODE.length)];
+  }
+
+  return "GE-" + suffixe;
+}
+
+async function enregistrerCommande(chatId, plat, nom, contact) {
+  // Le code sert d'identifiant du document Firestore
+  for (let essai = 0; essai < 5; essai++) {
+    const code = genererCode();
+
+    try {
+      await firestore.collection("commandes").doc(code).create({
+        code: code,
+        chatId: chatId,
+        plat: plat.nom,
+        lettre: plat.lettre,
+        prix: PRIX,
+        nom: nom,
+        contact: contact,
+        jour: dateJour(),
+        date: new Date().toISOString(),
+        statut: "en_attente"
+      });
+
+      console.log("🧾 Commande enregistrée dans Firestore :", code);
+      return code;
+    } catch (error) {
+      // Code déjà utilisé : on en génère un autre
+      if (error.code === 6 || /ALREADY_EXISTS/.test(error.message)) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw new Error("Impossible de générer un code unique");
 }
 
 // ===============================
@@ -318,7 +353,12 @@ async function traiterMessage(chatId, texte) {
   const plat = trouverPlat(texte);
 
   if (plat) {
-    etats.set(chatId, { plat: plat });
+    // On garde le nom ou le numéro déjà donnés si le client change de plat
+    etats.set(chatId, {
+      plat: plat,
+      nom: etat ? etat.nom : null,
+      contact: etat ? etat.contact : null
+    });
 
     return (
       `Excellent choix : ${plat.nom} à ${PRIX} F 😊\n\n` +
@@ -327,29 +367,44 @@ async function traiterMessage(chatId, texte) {
     );
   }
 
-  // Le client donne ses informations
+  // Le client donne ses informations (dans n'importe quel ordre)
   if (etat) {
-    const { nom, contact } = extraireInfos(texte);
+    const infos = extraireInfos(texte);
 
-    if (!nom || !contact) {
-      const manque = [];
-      if (!nom) manque.push("votre nom et prénom");
-      if (!contact) manque.push("votre numéro de téléphone");
+    if (infos.nom) etat.nom = infos.nom;
+    if (infos.contact) etat.contact = infos.contact;
+
+    if (!etat.nom || !etat.contact) {
+      if (etat.nom) {
+        return `Merci ${etat.nom} 😊 Il me manque votre numéro de téléphone.`;
+      }
+
+      if (etat.contact) {
+        return `Merci 😊 Il me manque votre nom (et prénom).`;
+      }
 
       return (
-        `Il me manque encore ${manque.join(" et ")} 😊\n` +
+        `Merci de m'envoyer votre nom et votre numéro de téléphone 😊\n` +
         `Exemple : Kouassi Jean 0102030405`
       );
     }
 
-    await enregistrerCommande(chatId, etat.plat, nom, contact);
+    const code = await enregistrerCommande(
+      chatId,
+      etat.plat,
+      etat.nom,
+      etat.contact
+    );
+
     etats.delete(chatId);
 
     return (
       `✅ Commande enregistrée !\n\n` +
+      `🔑 Votre code : ${code}\n` +
       `🍽️ ${etat.plat.nom} - ${PRIX} F\n` +
-      `👤 ${nom}\n` +
-      `📞 ${contact}\n\n` +
+      `👤 ${etat.nom}\n` +
+      `📞 ${etat.contact}\n\n` +
+      `Conservez bien ce code, il identifie votre commande.\n` +
       `Nous vous écrirons à ${HEURE_RAPPEL.replace(":", "h")} pour venir récupérer votre plat 📦\n` +
       `Merci de votre confiance 😊`
     );
@@ -401,8 +456,8 @@ async function envoyerRappels() {
   });
 
   for (const [chatId, commandes] of parClient) {
-    const plats = commandes.map(c => c.plat).join(", ");
-    const nom = commandes[0].nomComplet;
+    const plats = commandes.map(c => `${c.plat} (${c.code || c.id})`).join(", ");
+    const nom = commandes[0].nom || commandes[0].nomComplet;
 
     const message =
       `Bonjour ${nom} 😊\n\n` +
