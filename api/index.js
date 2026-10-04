@@ -30,6 +30,11 @@ const APP_SECRET = process.env.META_APP_SECRET;
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v23.0";
 const CRON_SECRET = process.env.CRON_SECRET;
 
+// Test uniquement : numéro reçu -> numéro de la liste de test Meta
+const ALIAS_TEST = {
+  "22572369840": "2250172369840"
+};
+
 const GEMINI_MODEL = "gemini-3.5-flash-lite";
 const FUSEAU = "Africa/Abidjan";
 const HEURE_RAPPEL_TEXTE = "11h59";
@@ -304,7 +309,7 @@ async function sendWhatsApp(to, text) {
       },
       body: JSON.stringify({
         messaging_product: "whatsapp",
-        to: to,
+        to: ALIAS_TEST[to] || to,
         type: "text",
         text: { body: text }
       })
@@ -613,4 +618,4 @@ module.exports = async function handler(req, res) {
 };
 
 // On reçoit le corps brut, nécessaire pour vérifier la signature de Meta
-module.exports.config = { api: { bodyParser: false } };
+module.exports
