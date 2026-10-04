@@ -30,7 +30,8 @@ const APP_SECRET = process.env.META_APP_SECRET;
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v23.0";
 const CRON_SECRET = process.env.CRON_SECRET;
 
-// Test uniquement : numéro reçu -> numéro de la liste de test Meta
+// Numéro reçu -> numéro à utiliser pour répondre
+// (gardé pour l'instant : ancien format du numéro de test)
 const ALIAS_TEST = {
   "22572369840": "2250172369840"
 };
@@ -564,6 +565,8 @@ async function sendWhatsApp(to, text) {
     throw new Error("META_ACCESS_TOKEN ou META_PHONE_NUMBER_ID manquant");
   }
 
+  const destinataire = ALIAS_TEST[to] || to;
+
   const response = await fetch(
     `https://graph.facebook.com/${GRAPH_VERSION}/${PHONE_NUMBER_ID}/messages`,
     {
@@ -574,7 +577,7 @@ async function sendWhatsApp(to, text) {
       },
       body: JSON.stringify({
         messaging_product: "whatsapp",
-        to: ALIAS_TEST[to] || to,
+        to: destinataire,
         type: "text",
         text: { body: text }
       })
@@ -584,6 +587,13 @@ async function sendWhatsApp(to, text) {
   const result = await response.json();
 
   if (!response.ok) {
+    // Diagnostic : erreur complète renvoyée par Meta
+    console.error(
+      "Détail WhatsApp :",
+      "to =", destinataire,
+      JSON.stringify(result.error)
+    );
+
     throw new Error(
       result?.error?.message || `WhatsApp HTTP ${response.status}`
     );
@@ -825,6 +835,9 @@ async function marquerTraite(messageId) {
 async function traiterMessageEntrant(msg) {
   const from = msg.from;
 
+  // Diagnostic : numéro exact envoyé par Meta
+  console.log("Message entrant de :", msg.from, "type :", msg.type);
+
   if (!from || !msg.id) return;
 
   if (!(await marquerTraite(msg.id))) return;
@@ -895,6 +908,9 @@ module.exports = async function handler(req, res) {
     } catch (error) {
       return res.status(400).json({ status: "error", message: "JSON invalide" });
     }
+
+    // Diagnostic : ce que Meta envoie réellement
+    console.log("Webhook reçu :", JSON.stringify(payload).slice(0, 1500));
 
     for (const entry of payload.entry || []) {
       for (const change of entry.changes || []) {
