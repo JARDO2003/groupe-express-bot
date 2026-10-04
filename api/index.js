@@ -39,33 +39,97 @@ const ALIAS_TEST = {
 const GEMINI_MODEL = "gemini-3.5-flash-lite";
 const GEMINI_TIMEOUT_MS = 6500;
 const FUSEAU = "Africa/Abidjan";
-const HEURE_RAPPEL_TEXTE = "11h59";
+const HEURE_RAPPEL_TEXTE = "12h";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
 const MAX_MESSAGE = 600;   // longueur maximale lue pour un message client
 const MAX_HISTORIQUE = 12; // nombre de messages gardés en mémoire
 const DUREE_ETAT_MS = 6 * 60 * 60 * 1000;
 
 // ===============================
-// MENU
+// MENU (stocké dans Firestore, géré depuis la page admin)
 // ===============================
 
-const PRIX = 1500;
-
-const PLATS = [
-  { lettre: "A", nom: "Placali", mots: ["placali", "plakali"] },
-  { lettre: "B", nom: "Tchep", mots: ["tchep"] },
-  { lettre: "C", nom: "Attiéké", mots: ["attieke", "atieke"] },
-  { lettre: "D", nom: "Aloko poisson", mots: ["aloko"] },
-  { lettre: "E", nom: "Spaghetti", mots: ["spaghetti", "spaghettis"] }
+const MENU_DEFAUT = [
+  ["Plats du jour", "Attiéké poisson", 1000, 0], ["Plats du jour", "Spécialité Garba", 500, 1],
+  ["Plats du jour", "Attiéké poulet", 1000, 1], ["Plats du jour", "Porc four (2 boules)", 1200, 0],
+  ["Pâtes & Petit pois", "Spaghetti rognon", 600, 0], ["Pâtes & Petit pois", "Spaghetti foie", 600, 0],
+  ["Pâtes & Petit pois", "Spaghetti viande", 800, 0], ["Pâtes & Petit pois", "Spagh. rognon + œuf", 700, 0],
+  ["Pâtes & Petit pois", "Spagh. foie + œuf", 700, 0], ["Pâtes & Petit pois", "Sauté revenir foie", 1500, 0],
+  ["Pâtes & Petit pois", "Sauté rognon", 1500, 0], ["Pâtes & Petit pois", "Sauté viande", 1500, 0],
+  ["Pâtes & Petit pois", "Petit pois rognon", 1000, 0], ["Pâtes & Petit pois", "Petit pois viande", 1500, 0],
+  ["Tchèpes", "Tchèpe au poisson (Rouge / Jaune)", 500, 0], ["Tchèpes", "Tchèpe au poulet (Rouge / Jaune)", 1000, 0],
+  ["Tchèpes", "Tchèpe au poulet XXL (Rouge / Jaune)", 2000, 0], ["Tchèpes", "Tchèpe viande XXL (Rouge / Jaune)", 2000, 0],
+  ["Riz aux saveurs (sauce arachide, feuille ou tomate)", "Riz Petit (format individuel)", 500, 0],
+  ["Riz aux saveurs (sauce arachide, feuille ou tomate)", "Riz Moyen (1-2 personnes)", 1000, 0],
+  ["Riz aux saveurs (sauce arachide, feuille ou tomate)", "Riz Grand (2-3 personnes)", 1500, 0],
+  ["Riz aux saveurs (sauce arachide, feuille ou tomate)", "Riz XXL (pour la famille)", 2000, 0]
 ];
 
+let PLATS = []; // plats actifs de la requête en cours, numérotés 1, 2, 3...
+
+function trierPlats(liste) {
+  const minCat = {};
+  liste.forEach(p => {
+    if (!(p.categorie in minCat) || p.ordre < minCat[p.categorie]) minCat[p.categorie] = p.ordre;
+  });
+  return liste.sort((x, y) =>
+    minCat[x.categorie] - minCat[y.categorie] || x.ordre - y.ordre
+  );
+}
+
+// Tous les plats (actifs ou non), avec leur id Firestore
+async function tousLesPlats() {
+  const col = firestore.collection("plats");
+  let snap = await col.get();
+
+  if (snap.empty) {
+    const batch = firestore.batch();
+    MENU_DEFAUT.forEach(([categorie, nom, prix, des], i) => {
+      batch.set(col.doc(), { categorie, nom, prix, des: !!des, actif: true, ordre: i });
+    });
+    await batch.commit();
+    snap = await col.get();
+  }
+
+  const liste = [];
+  snap.forEach(d => liste.push({ id: d.id, ...d.data() }));
+  return trierPlats(liste);
+}
+
+async function chargerMenu() {
+  const actifs = (await tousLesPlats()).filter(p => p.actif !== false);
+  PLATS = actifs.map((p, i) => ({ ...p, lettre: String(i + 1) }));
+  return PLATS;
+}
+
+function prixTexte(p) {
+  const n = Number(p.prix).toLocaleString("fr-FR").replace(/\u202f/g, " ");
+  return (p.des ? "Dès " : "") + n + " F";
+}
+
+function menuLignes() {
+  let cat = null;
+  let out = "";
+
+  for (const p of PLATS) {
+    if (p.categorie !== cat) {
+      cat = p.categorie;
+      out += `\n*${cat}*\n`;
+    }
+    out += `${p.lettre}. ${prixTexte(p)} - ${p.nom}\n`;
+  }
+
+  return out.trim();
+}
+
 function menuBloc() {
-  const lignes = PLATS.map(p => `${p.lettre} - ${p.nom}`).join("\n");
+  if (!PLATS.length) return "Notre menu est en cours de mise à jour, revenez dans un instant 😊";
 
   return (
-    `Nos plats, tous à ${PRIX} F :\n\n` +
-    `${lignes}\n\n` +
-    `Répondez simplement par la lettre de votre choix 😊`
+    `Voici nos plats (prix devant chaque plat) :\n\n${menuLignes()}\n\n` +
+    `Pour commander, répondez simplement par le numéro du plat 😊\n\n` +
+    `💬 Et vous, qu'en pensez-vous ? Donnez-nous votre avis sur nos plats ou notre service, ça nous aide à nous améliorer !`
   );
 }
 
@@ -94,13 +158,16 @@ function dateJour() {
 function trouverPlat(texte) {
   const t = normaliser(texte);
 
-  const lettre = t.match(/^([a-e])[\s.!)]*$/);
-  if (lettre) {
-    return PLATS.find(p => p.lettre.toLowerCase() === lettre[1]);
+  const numero = t.match(/^(?:n\s*°?\s*)?(\d{1,3})[\s.!)]*$/);
+  if (numero) {
+    return PLATS.find(p => p.lettre === String(Number(numero[1])));
   }
 
-  if (t.length <= 30) {
-    const trouves = PLATS.filter(p => p.mots.some(mot => t.includes(mot)));
+  if (t.length >= 4 && t.length <= 40) {
+    const trouves = PLATS.filter(p => {
+      const n = normaliser(p.nom);
+      return n.includes(t) || t.includes(n);
+    });
     if (trouves.length === 1) return trouves[0];
   }
 
@@ -252,7 +319,7 @@ function genererCode() {
   return "GE-" + suffixe;
 }
 
-async function enregistrerCommande(chatId, plat, nom, contact) {
+async function enregistrerCommande(chatId, plat, nom, contact, source = "whatsapp") {
   for (let essai = 0; essai < 5; essai++) {
     const code = genererCode();
 
@@ -262,7 +329,8 @@ async function enregistrerCommande(chatId, plat, nom, contact) {
         chatId: chatId,
         plat: plat.nom,
         lettre: plat.lettre,
-        prix: PRIX,
+        prix: plat.prix,
+        source: source,
         nom: nom,
         contact: contact,
         jour: dateJour(),
@@ -280,6 +348,22 @@ async function enregistrerCommande(chatId, plat, nom, contact) {
   }
 
   throw new Error("Impossible de générer un code unique");
+}
+
+async function enregistrerAvis(chatId, nom, avis) {
+  try {
+    await firestore.collection("avis").add({
+      chatId: chatId,
+      nom: nom || null,
+      avis: String(avis).slice(0, 500),
+      jour: dateJour(),
+      date: new Date().toISOString()
+    });
+    return true;
+  } catch (error) {
+    console.error("Avis non enregistré :", error.message);
+    return false;
+  }
 }
 
 async function enregistrerDemande(chatId, nom, message, resume) {
@@ -324,7 +408,8 @@ const SCHEMA_REPONSE = {
     contact: { type: "STRING", nullable: true },
     annuler: { type: "BOOLEAN" },
     montrer_menu: { type: "BOOLEAN" },
-    a_transmettre: { type: "STRING", nullable: true }
+    a_transmettre: { type: "STRING", nullable: true },
+    avis: { type: "STRING", nullable: true }
   },
   required: ["reponse"]
 };
@@ -361,9 +446,9 @@ Tu es l'assistant WhatsApp de Groupe Express, un service de vente de repas à em
 Tu discutes comme un vrai vendeur sympathique : naturel, chaleureux, serviable, jamais robotique.
 
 CE QUE TU SAIS (et rien de plus) :
-- Menu, tous les plats à ${PRIX} F :
-${PLATS.map(p => `  ${p.lettre} - ${p.nom}`).join("\n")}
-- Le client commande en donnant la lettre du plat, puis son nom, prénom et numéro de téléphone.
+- Menu (numéro. prix - plat) :
+${menuLignes()}
+- Le client commande en donnant le numéro du plat, puis son nom, prénom et numéro de téléphone.
 - Une commande concerne un seul plat. Pour plusieurs plats, le client passe une commande par plat.
 - Quand la commande est enregistrée, le client reçoit un code de commande (GE-XXXX).
 - Les plats se récupèrent sur place : à ${HEURE_RAPPEL_TEXTE}, un message prévient les clients de venir récupérer leurs plats.
@@ -372,7 +457,8 @@ ${PLATS.map(p => `  ${p.lettre} - ${p.nom}`).join("\n")}
 COMPRENDRE LES CLIENTS :
 - Les clients écrivent souvent en français ivoirien, avec de l'argot (nouchi), des abréviations de SMS (bjr, bsr, slt, cc, stp, svp, cmb, kom, c koi, jveux...), des fautes, des mots collés, des majuscules ou des messages très courts.
 - Comprends l'intention même si le message est mal écrit. Si vraiment ambigu, pose UNE seule question courte.
-- Reconnais les plats malgré les fautes : placali/plakali, tchep/tcheb, attiéké/atieke, aloko/alloco poisson, spaghetti/spag/spaghettis.
+- Reconnais les plats malgré les fautes (attiéké/atieke, tchèpe/tchep, spag/spaghetti, garba/garba...).
+- Si le client donne son avis, un compliment ou une critique sur les plats ou le service, copie-le fidèlement (court) dans "avis" et remercie-le chaleureusement. Ne mets dans "avis" que de vrais avis, jamais une question ni une commande.
 - Si le client parle d'un plat qui n'est pas au menu, dis-le gentiment et propose le menu. Ne prétends pas qu'il existe.
 - Réponds dans la langue du client (français par défaut), avec des mots simples. Vouvoie par défaut, tutoie si le client tutoie.
 - Réponses courtes (2 à 5 lignes), style WhatsApp, quelques emojis 🍽️📦😊 sans exagérer.
@@ -380,7 +466,7 @@ COMPRENDRE LES CLIENTS :
 - Si le sujet n'a rien à voir avec Groupe Express, réponds brièvement et poliment, puis ramène la conversation vers les repas.
 
 COMMENT TU AIDES À COMMANDER :
-- Mets "plat" à la lettre (A, B, C, D ou E) seulement quand le client veut clairement commander ce plat (une lettre seule, "je prends le tchep", "donnez-moi un placali"...). S'il pose seulement une question sur un plat, laisse "plat" vide.
+- Mets "plat" au numéro du plat (ex: "3") seulement quand le client veut clairement commander ce plat (un numéro seul, "je prends l'attiéké poisson", "donnez-moi un garba"...). S'il pose seulement une question sur un plat, laisse "plat" vide.
 - Une fois le plat choisi, demande le nom, prénom et numéro de téléphone (dans l'ordre que le client veut ; un seul nom suffit).
 - Remplis "nom" et "contact" uniquement avec ce que le client a réellement écrit. N'invente jamais un nom ou un numéro.
 - Ne dis JAMAIS que la commande est enregistrée et n'invente JAMAIS de code : le système le fait lui-même quand le plat, le nom et le contact sont connus. Tant que ce n'est pas complet, demande ce qui manque.
@@ -404,7 +490,7 @@ ${historique}
 Nouveau message du client :
 """${texte}"""
 
-Réponds uniquement avec un objet JSON ayant les champs : reponse (texte pour le client), plat, nom, contact, annuler, montrer_menu, a_transmettre. Mets null (ou false) pour ce qui ne s'applique pas.
+Réponds uniquement avec un objet JSON ayant les champs : reponse (texte pour le client), plat, nom, contact, annuler, montrer_menu, a_transmettre, avis. Mets null (ou false) pour ce qui ne s'applique pas.
 `;
 }
 
@@ -543,7 +629,7 @@ function reponseSuspecte(texte, commandes) {
 function demanderInfos(plat, nom, contact) {
   if (!nom && !contact) {
     return (
-      `Excellent choix : ${plat.nom} à ${PRIX} F 😊\n\n` +
+      `Excellent choix : ${plat.nom} à ${prixTexte(plat)} 😊\n\n` +
       `Merci de m'envoyer votre nom, prénom et contact (numéro de téléphone).\n\n` +
       `Exemple : Kouassi Jean 0102030405`
     );
@@ -609,8 +695,18 @@ async function sendWhatsApp(to, text) {
 async function traiterMessage(from, texteBrut) {
   const texte = String(texteBrut || "").slice(0, MAX_MESSAGE);
 
+  await chargerMenu();
+
   const etat = await lireEtat(from);
   const commandes = await commandesDuJour(from);
+
+  // Tout premier message (cc, bonjour, n'importe quoi) : bienvenue + menu avec prix + demande d'avis
+  if (etat.hist.length === 0 && !trouverPlat(texte)) {
+    const accueil = menuTexte();
+    etat.hist.push({ r: "c", t: texte }, { r: "b", t: "Bienvenue + menu envoyé" });
+    await ecrireEtat(from, { lettre: null, nom: null, contact: null, hist: etat.hist });
+    return accueil;
+  }
 
   let decision = null;
 
@@ -669,7 +765,7 @@ async function traiterMessage(from, texteBrut) {
     reponse =
       `✅ Commande enregistrée !\n\n` +
       `🔑 Votre code : ${code}\n` +
-      `🍽️ ${plat.nom} - ${PRIX} F\n` +
+      `🍽️ ${plat.nom} - ${prixTexte(plat)}\n` +
       `👤 ${nom}\n` +
       `📞 ${contact}\n\n` +
       `Conservez bien ce code, il identifie votre commande.\n` +
@@ -698,6 +794,10 @@ async function traiterMessage(from, texteBrut) {
 
     if (decision.montrer_menu === true) {
       reponse += "\n\n" + menuBloc();
+    }
+
+    if (typeof decision.avis === "string" && decision.avis.trim().length >= 3) {
+      await enregistrerAvis(from, nom, decision.avis.trim());
     }
 
     if (
@@ -781,6 +881,120 @@ async function envoyerRappels() {
 }
 
 // ===============================
+// ADMIN (page admin.html)
+// ===============================
+
+function motDePasseValide(cle) {
+  if (!ADMIN_PASSWORD || !cle) return false;
+  const h = v => crypto.createHash("sha256").update(String(v)).digest();
+  return crypto.timingSafeEqual(h(cle), h(ADMIN_PASSWORD));
+}
+
+function versChatId(contact) {
+  let c = String(contact || "").replace(/\D/g, "");
+  if (c.startsWith("00")) c = c.slice(2);
+  if (c.length === 10) c = "225" + c; // numéro ivoirien à 10 chiffres
+  return c;
+}
+
+async function liste(nomCol, champ, limite) {
+  const snap = await firestore.collection(nomCol).orderBy(champ, "desc").limit(limite).get();
+  const out = [];
+  snap.forEach(d => out.push({ id: d.id, ...d.data() }));
+  return out;
+}
+
+async function diffuser(texte) {
+  const snap = await firestore.collection("conversations").select().get();
+  const ids = snap.docs.map(d => d.id);
+  let envoyes = 0;
+
+  for (let i = 0; i < ids.length; i += 10) {
+    const r = await Promise.allSettled(ids.slice(i, i + 10).map(id => sendWhatsApp(id, texte)));
+    envoyes += r.filter(x => x.status === "fulfilled").length;
+  }
+
+  return { clients: ids.length, envoyes };
+}
+
+async function gererAdmin(req, res) {
+  const { texte } = await lireCorps(req);
+  let b = {};
+  try { b = JSON.parse(texte || "{}"); } catch (e) {}
+
+  if (!motDePasseValide(req.headers["x-admin-key"])) {
+    return res.status(401).json({ ok: false, message: "Mot de passe incorrect" });
+  }
+
+  const col = firestore.collection("plats");
+
+  switch (b.action) {
+    case "donnees": {
+      const tous = await tousLesPlats();
+      const commandes = (await firestore.collection("commandes").where("jour", "==", dateJour()).get())
+        .docs.map(d => d.data()).sort((x, y) => (y.date || "").localeCompare(x.date || ""));
+      return res.json({
+        ok: true,
+        plats: tous,
+        commandes,
+        avis: await liste("avis", "date", 100),
+        demandes: await liste("demandes_clients", "date", 50)
+      });
+    }
+    case "plat_ajouter": {
+      const nom = String(b.nom || "").trim();
+      const prix = Number(b.prix);
+      if (!nom || !(prix >= 0)) return res.status(400).json({ ok: false, message: "Nom ou prix invalide" });
+      const tous = await tousLesPlats();
+      const ordre = tous.reduce((m, p) => Math.max(m, p.ordre || 0), 0) + 1;
+      await col.add({
+        nom, prix, des: !!b.des, actif: true, ordre,
+        categorie: String(b.categorie || "Autres").trim() || "Autres"
+      });
+      return res.json({ ok: true });
+    }
+    case "plat_modifier": {
+      const champs = {};
+      if (typeof b.actif === "boolean") champs.actif = b.actif;
+      if (b.prix !== undefined && Number(b.prix) >= 0) champs.prix = Number(b.prix);
+      if (typeof b.nom === "string" && b.nom.trim()) champs.nom = b.nom.trim();
+      await col.doc(String(b.id)).update(champs);
+      return res.json({ ok: true });
+    }
+    case "plat_supprimer":
+      await col.doc(String(b.id)).delete();
+      return res.json({ ok: true });
+    case "commande_ajouter": {
+      const plat = (await tousLesPlats()).find(p => p.id === b.platId);
+      const nom = String(b.nom || "").trim();
+      const chatId = versChatId(b.contact);
+      if (!plat || !nom || chatId.length < 8) return res.status(400).json({ ok: false, message: "Plat, nom ou contact invalide" });
+      const code = await enregistrerCommande(chatId, plat, nom, String(b.contact).trim(), "admin");
+      return res.json({ ok: true, code });
+    }
+    case "commande_statut":
+      await firestore.collection("commandes").doc(String(b.code)).update({ statut: String(b.statut) });
+      return res.json({ ok: true });
+    case "message": {
+      const to = versChatId(b.to);
+      const t = String(b.text || "").trim().slice(0, 1000);
+      if (!to || !t) return res.status(400).json({ ok: false, message: "Numéro ou message vide" });
+      await sendWhatsApp(to, t);
+      return res.json({ ok: true });
+    }
+    case "diffusion": {
+      const t = String(b.text || "").trim().slice(0, 1000);
+      if (!t) return res.status(400).json({ ok: false, message: "Message vide" });
+      return res.json({ ok: true, ...(await diffuser(t)) });
+    }
+    case "rappel":
+      return res.json({ ok: true, ...(await envoyerRappels()) });
+    default:
+      return res.status(400).json({ ok: false, message: "Action inconnue" });
+  }
+}
+
+// ===============================
 // WEBHOOK
 // ===============================
 
@@ -847,6 +1061,7 @@ async function traiterMessageEntrant(msg) {
   if (msg.type === "text" && msg.text && msg.text.body) {
     reponse = await traiterMessage(from, msg.text.body);
   } else {
+    await chargerMenu();
     reponse =
       "Merci de m'écrire en texte 😊 Je ne peux pas encore lire les vocaux, images ou autres fichiers.\n\n" +
       menuBloc();
@@ -857,6 +1072,10 @@ async function traiterMessageEntrant(msg) {
 
 module.exports = async function handler(req, res) {
   try {
+    if (req.method === "POST" && new URL(req.url, "http://localhost").searchParams.get("admin") === "1") {
+      return await gererAdmin(req, res);
+    }
+
     if (req.method === "GET") {
       const url = new URL(req.url, "http://localhost");
       const params = url.searchParams;
