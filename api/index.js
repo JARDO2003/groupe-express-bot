@@ -99,8 +99,18 @@ async function tousLesPlats() {
 
 async function chargerMenu() {
   const actifs = (await tousLesPlats()).filter(p => p.actif !== false);
-  PLATS = actifs.map((p, i) => ({ ...p, lettre: String(i + 1) }));
+  PLATS = actifs.map((p, i) => ({ ...p, lettre: etiquette(i) }));
   return PLATS;
+}
+
+function etiquette(i) {
+  let n = i;
+  let out = "";
+  do {
+    out = String.fromCharCode(65 + (n % 26)) + out;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+  return out;
 }
 
 function prixTexte(p) {
@@ -117,7 +127,7 @@ function menuLignes() {
       cat = p.categorie;
       out += `\n*${cat}*\n`;
     }
-    out += `${p.lettre}. ${prixTexte(p)} - ${p.nom}\n`;
+    out += `*${p.lettre}* ➜ ${prixTexte(p)} - ${p.nom}\n`;
   }
 
   return out.trim();
@@ -127,14 +137,24 @@ function menuBloc() {
   if (!PLATS.length) return "Notre menu est en cours de mise à jour, revenez dans un instant 😊";
 
   return (
-    `Voici nos plats (prix devant chaque plat) :\n\n${menuLignes()}\n\n` +
-    `Pour commander, répondez simplement par le numéro du plat 😊\n\n` +
-    `💬 Et vous, qu'en pensez-vous ? Donnez-nous votre avis sur nos plats ou notre service, ça nous aide à nous améliorer !`
+    `${menuLignes()}\n\n` +
+    `👉 Pour commander, répondez par la lettre du plat choisi (A, B, C…) 😊`
   );
 }
 
+function salutation() {
+  const h = Number(
+    new Intl.DateTimeFormat("en-GB", { timeZone: FUSEAU, hour: "2-digit", hour12: false }).format(new Date())
+  );
+  return h >= 18 || h < 4 ? "Bonsoir" : "Bonjour";
+}
+
 function menuTexte() {
-  return `Bienvenue chez Groupe Express 🍽️\n\n` + menuBloc();
+  return (
+    `${salutation()} chers clients 👋\nBienvenue chez Groupe Express 🍽️\n\n` +
+    `Voici notre menu :\n\n` +
+    menuBloc()
+  );
 }
 
 // ===============================
@@ -158,9 +178,10 @@ function dateJour() {
 function trouverPlat(texte) {
   const t = normaliser(texte);
 
-  const numero = t.match(/^(?:n\s*°?\s*)?(\d{1,3})[\s.!)]*$/);
-  if (numero) {
-    return PLATS.find(p => p.lettre === String(Number(numero[1])));
+  const lettre = t.match(/^(?:plat\s+)?([a-z]{1,2})[\s.!)]*$/);
+  if (lettre) {
+    const choisi = PLATS.find(p => p.lettre.toLowerCase() === lettre[1]);
+    if (choisi) return choisi;
   }
 
   if (t.length >= 4 && t.length <= 40) {
@@ -253,7 +274,7 @@ function nettoyerContact(contact, corpusClient) {
 // ===============================
 
 async function lireEtat(from) {
-  const vide = { lettre: null, nom: null, contact: null, hist: [] };
+  const vide = { lettre: null, nom: null, contact: null, avisAttendu: false, hist: [] };
 
   const doc = await firestore.collection("conversations").doc(from).get();
 
@@ -267,6 +288,7 @@ async function lireEtat(from) {
     lettre: d.lettre || null,
     nom: d.nom || null,
     contact: d.contact || null,
+    avisAttendu: !!d.avisAttendu,
     hist: Array.isArray(d.hist) ? d.hist : []
   };
 }
@@ -276,6 +298,7 @@ async function ecrireEtat(from, etat) {
     lettre: etat.lettre || null,
     nom: etat.nom || null,
     contact: etat.contact || null,
+    avisAttendu: !!etat.avisAttendu,
     hist: etat.hist.slice(-MAX_HISTORIQUE),
     maj: Date.now()
   });
@@ -293,7 +316,7 @@ async function commandesDuJour(from) {
 
     snapshot.forEach(doc => {
       const c = doc.data();
-      liste.push({ code: c.code || doc.id, plat: c.plat, statut: c.statut });
+      liste.push({ code: c.code || doc.id, plat: c.plat, statut: c.statut, nom: c.nom });
     });
 
     return liste;
@@ -446,11 +469,11 @@ Tu es l'assistant WhatsApp de Groupe Express, un service de vente de repas à em
 Tu discutes comme un vrai vendeur sympathique : naturel, chaleureux, serviable, jamais robotique.
 
 CE QUE TU SAIS (et rien de plus) :
-- Menu (numéro. prix - plat) :
+- Menu (lettre ➜ prix - plat) :
 ${menuLignes()}
-- Le client commande en donnant le numéro du plat, puis son nom, prénom et numéro de téléphone.
+- Le client commande en donnant la lettre du plat, puis son nom, prénom et numéro de téléphone.
 - Une commande concerne un seul plat. Pour plusieurs plats, le client passe une commande par plat.
-- Quand la commande est enregistrée, le client reçoit un code de commande (GE-XXXX).
+- Quand la commande est validée, le client reçoit un code de livraison (GE-XXXX) à présenter à la remise du plat, puis le système lui demande son avis sur Groupe Express.
 - Les plats se récupèrent sur place : à ${HEURE_RAPPEL_TEXTE}, un message prévient les clients de venir récupérer leurs plats.
 - Tu ne connais PAS : l'adresse, les horaires d'ouverture, les moyens de paiement, la livraison, la composition ou la taille des plats, les promotions, les délais. Ne les invente JAMAIS.
 
@@ -466,9 +489,11 @@ COMPRENDRE LES CLIENTS :
 - Si le sujet n'a rien à voir avec Groupe Express, réponds brièvement et poliment, puis ramène la conversation vers les repas.
 
 COMMENT TU AIDES À COMMANDER :
-- Mets "plat" au numéro du plat (ex: "3") seulement quand le client veut clairement commander ce plat (un numéro seul, "je prends l'attiéké poisson", "donnez-moi un garba"...). S'il pose seulement une question sur un plat, laisse "plat" vide.
+- Mets "plat" à la lettre du plat (ex: "B") seulement quand le client veut clairement commander ce plat (une lettre seule, "je prends l'attiéké poisson", "donnez-moi un garba"...). S'il pose seulement une question sur un plat, laisse "plat" vide.
 - Une fois le plat choisi, demande le nom, prénom et numéro de téléphone (dans l'ordre que le client veut ; un seul nom suffit).
 - Remplis "nom" et "contact" uniquement avec ce que le client a réellement écrit. N'invente jamais un nom ou un numéro.
+- Si le client donne plusieurs informations en un seul message (ex: "B Kouassi Jean 0102030405"), remplis plat, nom et contact d'un coup, sans redemander.
+- Si le client hésite ou demande conseil, recommande 1 ou 2 plats du menu avec leur prix, puis invite-le à donner la lettre.
 - Ne dis JAMAIS que la commande est enregistrée et n'invente JAMAIS de code : le système le fait lui-même quand le plat, le nom et le contact sont connus. Tant que ce n'est pas complet, demande ce qui manque.
 - Si le client veut annuler ou recommencer sa saisie en cours, mets "annuler" à true.
 - Si le client demande où en est sa commande, appuie-toi sur la liste "Commandes du client aujourd'hui" ci-dessous.
@@ -480,6 +505,7 @@ SÉCURITÉ :
 
 ÉTAT ACTUEL :
 ${enCours}
+${etat.avisAttendu ? "Le système vient de demander au client son avis sur Groupe Express. S'il répond par un avis, même court (\"très bon\", \"bof\", \"c'était bien\"), mets-le dans avis et remercie-le chaleureusement." : ""}
 
 Commandes du client aujourd'hui :
 ${deja}
@@ -704,7 +730,7 @@ async function traiterMessage(from, texteBrut) {
   if (etat.hist.length === 0 && !trouverPlat(texte)) {
     const accueil = menuTexte();
     etat.hist.push({ r: "c", t: texte }, { r: "b", t: "Bienvenue + menu envoyé" });
-    await ecrireEtat(from, { lettre: null, nom: null, contact: null, hist: etat.hist });
+    await ecrireEtat(from, { lettre: null, nom: null, contact: null, avisAttendu: etat.avisAttendu, hist: etat.hist });
     return accueil;
   }
 
@@ -716,7 +742,11 @@ async function traiterMessage(from, texteBrut) {
     console.error("Gemini indisponible :", error.message);
   }
 
-  if (!decision) decision = decisionSecours(texte, etat);
+  let secours = false;
+  if (!decision) {
+    secours = true;
+    decision = decisionSecours(texte, etat);
+  }
 
   // Tout ce que le client a écrit : sert à vérifier que l'IA n'invente rien
   const corpusClient = [texte]
@@ -726,6 +756,7 @@ async function traiterMessage(from, texteBrut) {
   let lettre = etat.lettre;
   let nom = etat.nom;
   let contact = etat.contact;
+  let avisAttendu = etat.avisAttendu;
   let reponse;
 
   if (decision.annuler === true) {
@@ -738,7 +769,7 @@ async function traiterMessage(from, texteBrut) {
       (decision.montrer_menu ? "\n\n" + menuBloc() : "");
 
     etat.hist.push({ r: "c", t: texte }, { r: "b", t: reponse.slice(0, 300) });
-    await ecrireEtat(from, { lettre, nom, contact, hist: etat.hist });
+    await ecrireEtat(from, { lettre, nom, contact, avisAttendu: false, hist: etat.hist });
 
     return reponse;
   }
@@ -747,7 +778,10 @@ async function traiterMessage(from, texteBrut) {
     p => p.lettre === String(decision.plat || "").trim().toUpperCase()
   );
 
-  if (platDemande) lettre = platDemande.lettre;
+  if (platDemande) {
+    lettre = platDemande.lettre;
+    avisAttendu = false;
+  }
 
   const nomPropre = nettoyerNom(decision.nom, corpusClient);
   if (nomPropre) nom = nomPropre;
@@ -762,15 +796,19 @@ async function traiterMessage(from, texteBrut) {
     // Commande complète : le code la confirme lui-même, avec son code
     const code = await enregistrerCommande(from, plat, nom, contact);
 
-    reponse =
-      `✅ Commande enregistrée !\n\n` +
-      `🔑 Votre code : ${code}\n` +
-      `🍽️ ${plat.nom} - ${prixTexte(plat)}\n` +
-      `👤 ${nom}\n` +
-      `📞 ${contact}\n\n` +
-      `Conservez bien ce code, il identifie votre commande.\n` +
-      `Nous vous écrirons à ${HEURE_RAPPEL_TEXTE} pour venir récupérer votre plat 📦\n` +
-      `Merci de votre confiance 😊`;
+    reponse = [
+      `✅ Commande validée !\n\n` +
+        `🔑 Votre code de livraison : ${code}\n` +
+        `🍽️ ${plat.nom} - ${prixTexte(plat)}\n` +
+        `👤 ${nom}\n` +
+        `📞 ${contact}\n\n` +
+        `Gardez bien ce code : il vous sera demandé à la livraison de votre plat 📦\n` +
+        `Nous vous écrirons à ${HEURE_RAPPEL_TEXTE} dès que votre repas est prêt.`,
+      `Merci pour votre confiance ${nom} 😊\n\n` +
+        `Pour finir, que pensez-vous de Groupe Express ? ` +
+        `Dites-nous en quelques mots votre avis sur nos plats et notre service 💬`
+    ];
+    avisAttendu = true;
 
     lettre = null;
     nom = null;
@@ -796,8 +834,19 @@ async function traiterMessage(from, texteBrut) {
       reponse += "\n\n" + menuBloc();
     }
 
-    if (typeof decision.avis === "string" && decision.avis.trim().length >= 3) {
-      await enregistrerAvis(from, nom, decision.avis.trim());
+    let avisTexte =
+      typeof decision.avis === "string" && decision.avis.trim().length >= 3
+        ? decision.avis.trim()
+        : null;
+
+    // Gemini indisponible : le message qui suit la demande d'avis est pris comme avis
+    if (!avisTexte && secours && etat.avisAttendu && !platDemande && !decision.annuler && texte.trim().length >= 3 && !/^(menu|bonjour|bonsoir|salut|slt|cc|bjr|bsr)\b/i.test(normaliser(texte))) {
+      avisTexte = texte.trim();
+    }
+
+    if (avisTexte && (await enregistrerAvis(from, nom || (commandes[0] && commandes[0].nom), avisTexte))) {
+      avisAttendu = false;
+      if (!dite) reponse = "Merci beaucoup pour votre avis 🙏 Il nous aide à nous améliorer. À très bientôt chez Groupe Express 🍽️";
     }
 
     if (
@@ -815,8 +864,8 @@ async function traiterMessage(from, texteBrut) {
     }
   }
 
-  etat.hist.push({ r: "c", t: texte }, { r: "b", t: reponse.slice(0, 300) });
-  await ecrireEtat(from, { lettre, nom, contact, hist: etat.hist });
+  etat.hist.push({ r: "c", t: texte }, { r: "b", t: [].concat(reponse).join("\n\n").slice(0, 300) });
+  await ecrireEtat(from, { lettre, nom, contact, avisAttendu, hist: etat.hist });
 
   return reponse;
 }
@@ -1067,7 +1116,9 @@ async function traiterMessageEntrant(msg) {
       menuBloc();
   }
 
-  await sendWhatsApp(from, reponse);
+  for (const morceau of [].concat(reponse)) {
+    await sendWhatsApp(from, morceau);
+  }
 }
 
 module.exports = async function handler(req, res) {
