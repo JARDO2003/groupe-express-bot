@@ -1011,7 +1011,7 @@ async function envoyerRappels() {
 }
 
 // ===============================
-// ADMIN (page admin.html)
+// FILE D'ENVOIS (la page admin écrit dans Firestore, le bot envoie)
 // ===============================
 
 function versChatId(contact) {
@@ -1021,14 +1021,9 @@ function versChatId(contact) {
   return c;
 }
 
-async function liste(nomCol, champ, limite) {
-  const snap = await firestore.collection(nomCol).orderBy(champ, "desc").limit(limite).get();
-  const out = [];
-  snap.forEach(d => out.push({ id: d.id, ...d.data() }));
-  return out;
-}
-
 async function diffuser(texte) {
+  if (!texte) throw new Error("Message vide");
+
   const snap = await firestore.collection("conversations").select().get();
   const ids = snap.docs.map(d => d.id);
   let envoyes = 0;
@@ -1041,77 +1036,57 @@ async function diffuser(texte) {
   return { clients: ids.length, envoyes };
 }
 
-async function gererAdmin(req, res) {
-  const { texte } = await lireCorps(req);
-  let b = {};
-  try { b = JSON.parse(texte || "{}"); } catch (e) {}
+// Lit les demandes déposées par la page admin (collection "file_envois") et les exécute
+async function traiterFile() {
+  const snap = await firestore
+    .collection("file_envois")
+    .where("statut", "==", "en_attente")
+    .limit(20)
+    .get();
 
-  const col = firestore.collection("plats");
+  let traites = 0;
 
-  switch (b.action) {
-    case "donnees": {
-      const tous = await tousLesPlats();
-      const commandes = (await firestore.collection("commandes").where("jour", "==", dateJour()).get())
-        .docs.map(d => d.data()).sort((x, y) => (y.date || "").localeCompare(x.date || ""));
-      return res.json({
-        ok: true,
-        plats: tous,
-        commandes,
-        avis: await liste("avis", "date", 100),
-        demandes: await liste("demandes_clients", "date", 50)
-      });
+  for (const d of snap.docs) {
+    const ref = d.ref;
+
+    // On "réserve" la demande pour éviter un double envoi si deux appels se croisent
+    const pris = await firestore.runTransaction(async t => {
+      const cur = await t.get(ref);
+      if (!cur.exists || cur.data().statut !== "en_attente") return false;
+      t.update(ref, { statut: "en_cours", debut: new Date().toISOString() });
+      return true;
+    });
+
+    if (!pris) continue;
+
+    const e = d.data();
+
+    try {
+      let resultat = {};
+
+      if (e.type === "message") {
+        const to = versChatId(e.to);
+        const texte = String(e.text || "").trim().slice(0, 1000);
+        if (!to || !texte) throw new Error("Numéro ou message vide");
+        await sendWhatsApp(to, texte);
+      } else if (e.type === "diffusion") {
+        resultat = await diffuser(String(e.text || "").trim().slice(0, 1000));
+      } else if (e.type === "rappel") {
+        resultat = await envoyerRappels();
+      } else {
+        throw new Error("Type inconnu");
+      }
+
+      await ref.update({ statut: "envoye", fin: new Date().toISOString(), ...resultat });
+    } catch (error) {
+      console.error("Envoi admin échoué :", error.message);
+      await ref.update({ statut: "erreur", erreur: error.message, fin: new Date().toISOString() });
     }
-    case "plat_ajouter": {
-      const nom = String(b.nom || "").trim();
-      const prix = Number(b.prix);
-      if (!nom || !(prix >= 0)) return res.status(400).json({ ok: false, message: "Nom ou prix invalide" });
-      const tous = await tousLesPlats();
-      const ordre = tous.reduce((m, p) => Math.max(m, p.ordre || 0), 0) + 1;
-      await col.add({
-        nom, prix, des: !!b.des, actif: true, ordre,
-        categorie: String(b.categorie || "Autres").trim() || "Autres"
-      });
-      return res.json({ ok: true });
-    }
-    case "plat_modifier": {
-      const champs = {};
-      if (typeof b.actif === "boolean") champs.actif = b.actif;
-      if (b.prix !== undefined && Number(b.prix) >= 0) champs.prix = Number(b.prix);
-      if (typeof b.nom === "string" && b.nom.trim()) champs.nom = b.nom.trim();
-      await col.doc(String(b.id)).update(champs);
-      return res.json({ ok: true });
-    }
-    case "plat_supprimer":
-      await col.doc(String(b.id)).delete();
-      return res.json({ ok: true });
-    case "commande_ajouter": {
-      const plat = (await tousLesPlats()).find(p => p.id === b.platId);
-      const nom = String(b.nom || "").trim();
-      const chatId = versChatId(b.contact);
-      if (!plat || !nom || chatId.length < 8) return res.status(400).json({ ok: false, message: "Plat, nom ou contact invalide" });
-      const code = await enregistrerCommande(chatId, plat, nom, String(b.contact).trim(), "admin");
-      return res.json({ ok: true, code });
-    }
-    case "commande_statut":
-      await firestore.collection("commandes").doc(String(b.code)).update({ statut: String(b.statut) });
-      return res.json({ ok: true });
-    case "message": {
-      const to = versChatId(b.to);
-      const t = String(b.text || "").trim().slice(0, 1000);
-      if (!to || !t) return res.status(400).json({ ok: false, message: "Numéro ou message vide" });
-      await sendWhatsApp(to, t);
-      return res.json({ ok: true });
-    }
-    case "diffusion": {
-      const t = String(b.text || "").trim().slice(0, 1000);
-      if (!t) return res.status(400).json({ ok: false, message: "Message vide" });
-      return res.json({ ok: true, ...(await diffuser(t)) });
-    }
-    case "rappel":
-      return res.json({ ok: true, ...(await envoyerRappels()) });
-    default:
-      return res.status(400).json({ ok: false, message: "Action inconnue" });
+
+    traites++;
   }
+
+  return { traites };
 }
 
 // ===============================
@@ -1210,10 +1185,6 @@ module.exports = async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(204).end();
 
   try {
-    if (req.method === "POST" && new URL(req.url, "http://localhost").searchParams.get("admin") === "1") {
-      return await gererAdmin(req, res);
-    }
-
     if (req.method === "GET") {
       const url = new URL(req.url, "http://localhost");
       const params = url.searchParams;
@@ -1228,6 +1199,12 @@ module.exports = async function handler(req, res) {
           return res.status(200).send(params.get("hub.challenge"));
         }
         return res.status(403).send("Forbidden");
+      }
+
+      // Envoi des messages en attente (déposés par la page admin dans Firestore)
+      if (params.get("action") === "sortie") {
+        const resultat = await traiterFile();
+        return res.status(200).json({ status: "ok", ...resultat });
       }
 
       // Rappel de 11h59, appelé par un planificateur
@@ -1281,6 +1258,13 @@ module.exports = async function handler(req, res) {
           }
         }
       }
+    }
+
+    // Profite de chaque message reçu pour envoyer ce que l'admin a mis en attente
+    try {
+      await traiterFile();
+    } catch (error) {
+      console.error("File d'envois :", error.message);
     }
 
     return res.status(200).json({ status: "ok" });
