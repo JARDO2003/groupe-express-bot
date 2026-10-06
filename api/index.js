@@ -1025,7 +1025,8 @@ async function diffuser(texte) {
   if (!texte) throw new Error("Message vide");
 
   const snap = await firestore.collection("conversations").select().get();
-  const ids = snap.docs.map(d => d.id);
+  // "conversations" sert aussi à l'app de comptabilité : on ne garde que les numéros WhatsApp
+  const ids = snap.docs.map(d => d.id).filter(id => /^\d{8,15}$/.test(id));
   let envoyes = 0;
 
   for (let i = 0; i < ids.length; i += 10) {
