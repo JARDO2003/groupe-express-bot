@@ -1090,6 +1090,22 @@ async function traiterFile() {
   return { traites };
 }
 
+// Sur Render (serveur toujours allumé) : le bot écoute Firestore en direct
+// et envoie dès que la page admin dépose un message, sans aucun appel externe.
+if (process.env.RENDER) {
+  firestore
+    .collection("file_envois")
+    .where("statut", "==", "en_attente")
+    .onSnapshot(
+      snap => {
+        if (!snap.empty) {
+          traiterFile().catch(e => console.error("File d'envois :", e.message));
+        }
+      },
+      e => console.error("Écoute Firestore :", e.message)
+    );
+}
+
 // ===============================
 // WEBHOOK
 // ===============================
