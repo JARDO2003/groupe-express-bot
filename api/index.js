@@ -29,7 +29,8 @@ const PHONE_NUMBER_ID = process.env.META_PHONE_NUMBER_ID;
 const APP_SECRET = process.env.META_APP_SECRET;
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v23.0";
 const CRON_SECRET = process.env.CRON_SECRET;
-const SITE_URL = (process.env.SITE_URL || "").replace(/\/$/, ""); // ex: https://ton-projet.vercel.app
+// Site où se trouvent u.jpg et f.jpg (dossier public/ du dépôt du site)
+const SITE_URL = (process.env.SITE_URL || "https://groupe-express.vercel.app").replace(/\/$/, "");
 
 // Images envoyées par l'IA (fichiers à mettre dans le dossier public/ du projet Vercel)
 const IMAGES = {
@@ -1201,6 +1202,13 @@ async function traiterMessageEntrant(msg) {
 }
 
 module.exports = async function handler(req, res) {
+  // CORS : autorise la page admin hébergée sur un autre projet Vercel
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") return res.status(204).end();
+
   try {
     if (req.method === "POST" && new URL(req.url, "http://localhost").searchParams.get("admin") === "1") {
       return await gererAdmin(req, res);
