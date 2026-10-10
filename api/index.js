@@ -368,7 +368,21 @@ function genererCode() {
   return "GE-" + suffixe;
 }
 
+// Réglage ExpressSend (activé / désactivé dans la page admin)
+async function lireConfigExpress() {
+  try {
+    const d = await firestore.collection("config").doc("expressSend").get();
+    const cfg = d.exists ? d.data() : {};
+    return { actif: cfg.actif === true, inclureContact: cfg.inclureContact === true };
+  } catch (error) {
+    console.error("Config ExpressSend :", error.message);
+    return { actif: false, inclureContact: false };
+  }
+}
+
 async function enregistrerCommande(chatId, plat, nom, contact, source = "whatsapp") {
+  const express = await lireConfigExpress();
+
   for (let essai = 0; essai < 5; essai++) {
     const code = genererCode();
 
@@ -378,13 +392,16 @@ async function enregistrerCommande(chatId, plat, nom, contact, source = "whatsap
         chatId: chatId,
         plat: plat.nom,
         lettre: plat.lettre,
+        platId: plat.id || null,
         prix: plat.prix,
         source: source,
         nom: nom,
         contact: contact,
         jour: dateJour(),
         date: new Date().toISOString(),
-        statut: "en_attente"
+        statut: "en_attente",
+        // ExpressSend actif : la commande part chez le fournisseur du plat
+        ...(express.actif ? { fournisseurEnvoi: "a_envoyer" } : {})
       });
 
       return code;
@@ -727,10 +744,12 @@ function setTransport(t) {
   transport = t;
 }
 
-const sendWhatsApp = (to, text) => transport.sendText(to, text);
+const sendWhatsApp = (to, text) =>
+  transport ? transport.sendText(to, text) : Promise.reject(new Error("WhatsApp non connecté"));
 
 // Envoi d'une image (l'URL doit être publique) avec une légende
-const sendWhatsAppImage = (to, url, legende) => transport.sendImage(to, url, legende);
+const sendWhatsAppImage = (to, url, legende) =>
+  transport ? transport.sendImage(to, url, legende) : Promise.reject(new Error("WhatsApp non connecté"));
 
 // ===============================
 // LOGIQUE DE CONVERSATION
@@ -1054,6 +1073,168 @@ async function traiterFile() {
 }
 
 // ===============================
+// EXPRESSSEND : chaque commande est envoyée sur le WhatsApp du fournisseur de son plat
+// (réglage dans la page admin, onglet ExpressSend : fournisseurs, numéros, plats)
+// ===============================
+
+function prixF(n) {
+  return Number(n || 0).toLocaleString("fr-FR").replace(/[\u202f\u00a0]/g, " ") + " F";
+}
+
+function messageFournisseur(c, f, cfg) {
+  const heure = new Intl.DateTimeFormat("fr-FR", {
+    timeZone: FUSEAU,
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(new Date(c.date || Date.now()));
+
+  return (
+    `Bonjour ${f.nom} 👋\n\n` +
+    `🛒 *Nouvelle commande Groupe Express*\n\n` +
+    `🔑 Code : ${c.code || c.id}\n` +
+    `🍽️ ${c.plat} - ${prixF(c.prix)}\n` +
+    `👤 Client : ${c.nom}\n` +
+    (cfg.inclureContact && c.contact ? `📞 ${c.contact}\n` : "") +
+    `🕐 ${heure}\n\n` +
+    `Merci de préparer cette commande 🙏`
+  );
+}
+
+let expressTimer = null;
+let expressPauseJusqua = 0;
+let expressEnCours = false;
+let expressRelance = false;
+let expressEcoute = false;
+
+function planifierExpress(delai = 3000) {
+  clearTimeout(expressTimer);
+  // Petit délai : le client reçoit d'abord sa propre confirmation
+  const attente = Math.max(delai, expressPauseJusqua - Date.now());
+  expressTimer = setTimeout(
+    () => traiterExpressSend().catch(e => console.error("ExpressSend :", e.message)),
+    attente
+  );
+}
+
+async function traiterExpressSend() {
+  if (expressEnCours) {
+    expressRelance = true;
+    return { traites: 0 };
+  }
+
+  expressEnCours = true;
+  let traites = 0;
+
+  try {
+    const snap = await firestore
+      .collection("commandes")
+      .where("fournisseurEnvoi", "==", "a_envoyer")
+      .limit(20)
+      .get();
+
+    if (snap.empty) return { traites: 0 };
+
+    const cfg = await lireConfigExpress();
+
+    // Option désactivée entre-temps : rien n'est envoyé
+    if (!cfg.actif) {
+      for (const d of snap.docs) {
+        await d.ref.update({ fournisseurEnvoi: "desactive" }).catch(() => {});
+      }
+      return { traites: 0 };
+    }
+
+    const fSnap = await firestore.collection("fournisseurs").get();
+    const fournisseurs = [];
+    fSnap.forEach(d => fournisseurs.push({ id: d.id, ...d.data() }));
+
+    const plats = await tousLesPlats();
+
+    for (const d of snap.docs) {
+      const ref = d.ref;
+
+      // On "réserve" la commande pour éviter un double envoi
+      const pris = await firestore.runTransaction(async t => {
+        const cur = await t.get(ref);
+        if (!cur.exists || cur.data().fournisseurEnvoi !== "a_envoyer") return false;
+        t.update(ref, { fournisseurEnvoi: "en_cours" });
+        return true;
+      });
+
+      if (!pris) continue;
+
+      const c = { id: d.id, ...d.data() };
+      const platId = c.platId || (plats.find(p => p.nom === c.plat) || {}).id;
+
+      const f = fournisseurs.find(
+        x => x.actif !== false && Array.isArray(x.plats) && x.plats.includes(platId)
+      );
+
+      if (!f || !f.numero) {
+        await ref.update({ fournisseurEnvoi: "sans_fournisseur" });
+        continue;
+      }
+
+      try {
+        await sendWhatsApp(f.numero, messageFournisseur(c, f, cfg));
+
+        await ref.update({
+          fournisseurEnvoi: "envoye",
+          fournisseurId: f.id,
+          fournisseurNom: f.nom,
+          fournisseurEnvoyeLe: new Date().toISOString(),
+          fournisseurErreur: null
+        });
+
+        traites++;
+      } catch (error) {
+        if (/non connect/i.test(error.message)) {
+          // WhatsApp n'est pas encore prêt : on remet la commande en file et on réessaie
+          expressPauseJusqua = Date.now() + 20000;
+          await ref.update({ fournisseurEnvoi: "a_envoyer" });
+          break;
+        }
+
+        console.error("ExpressSend :", error.message);
+
+        await ref.update({
+          fournisseurEnvoi: "erreur",
+          fournisseurNom: f.nom,
+          fournisseurErreur: String(error.message).slice(0, 200)
+        });
+      }
+    }
+  } catch (error) {
+    console.error("ExpressSend :", error.message);
+  } finally {
+    expressEnCours = false;
+
+    if (expressRelance) {
+      expressRelance = false;
+      planifierExpress();
+    }
+  }
+
+  return { traites };
+}
+
+// Écoute en direct : toute commande marquée "a_envoyer" (WhatsApp ou page admin) part chez le fournisseur
+function demarrerExpressSend() {
+  if (expressEcoute) return;
+  expressEcoute = true;
+
+  firestore
+    .collection("commandes")
+    .where("fournisseurEnvoi", "==", "a_envoyer")
+    .onSnapshot(
+      snap => {
+        if (!snap.empty) planifierExpress();
+      },
+      e => console.error("Écoute ExpressSend :", e.message)
+    );
+}
+
+// ===============================
 // MESSAGES ENTRANTS (appelés par index.js)
 // ===============================
 
@@ -1107,4 +1288,6 @@ async function traiterMessageEntrant(msg) {
   }
 }
 
-module.exports = { setTransport, traiterMessageEntrant, traiterFile, envoyerRappels };
+demarrerExpressSend();
+
+module.exports = { setTransport, traiterMessageEntrant, traiterFile, envoyerRappels, traiterExpressSend };
