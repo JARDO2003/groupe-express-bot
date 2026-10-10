@@ -1,5 +1,5 @@
 // index.js : connexion WhatsApp (Baileys) pour le bot Groupe Express
-// Ce fichier remplace le webhook Meta. Votre logique reste dans bot.js.
+// Ce fichier remplace le webhook Meta. La logique du bot est dans bot.js.
 
 const http = require("http");
 const qrcode = require("qrcode-terminal");
@@ -68,7 +68,8 @@ async function utiliserAuthFirestore(b) {
 }
 
 // ===============================
-// ENVOI : file d'attente avec petits délais (limite le risque de bannissement)
+// ENVOI : file d'attente avec de courts délais
+// (assez rapide pour le client, assez humain pour limiter le risque de bannissement)
 // ===============================
 
 let sock = null;
@@ -81,10 +82,11 @@ function versJid(to) {
 
 const pause = ms => new Promise(r => setTimeout(r, ms));
 
+// Un seul envoi à la fois, avec un petit écart entre deux messages
 let file = Promise.resolve();
 function enFile(tache) {
   const p = file.then(tache);
-  file = p.catch(() => {}).then(() => pause(1500 + Math.random() * 2500));
+  file = p.catch(() => {}).then(() => pause(500 + Math.random() * 700));
   return p;
 }
 
@@ -94,8 +96,9 @@ bot.setTransport({
       if (!sock || !pret) throw new Error("WhatsApp non connecté");
       const jid = versJid(to);
       await sock.sendPresenceUpdate("composing", jid).catch(() => {});
-      await pause(Math.min(3000, 500 + String(text).length * 15));
+      await pause(Math.min(1200, 300 + String(text).length * 6));
       await sock.sendMessage(jid, { text: String(text) });
+      await sock.sendPresenceUpdate("paused", jid).catch(() => {});
     }),
 
   sendImage: (to, url, legende) =>
@@ -160,6 +163,20 @@ setInterval(async () => {
 }, 20000);
 
 // ===============================
+// ANTI-VEILLE (Render gratuit)
+// Le service s'appelle lui-même toutes les 10 minutes tant qu'il est éveillé.
+// Gardez aussi un moniteur UptimeRobot pour le réveiller en cas de coupure.
+// ===============================
+
+const URL_PUBLIQUE = process.env.RENDER_EXTERNAL_URL;
+
+if (URL_PUBLIQUE) {
+  setInterval(() => {
+    fetch(URL_PUBLIQUE).catch(() => {});
+  }, 10 * 60 * 1000);
+}
+
+// ===============================
 // CONNEXION BAILEYS
 // ===============================
 
@@ -197,9 +214,10 @@ async function demarrer() {
 
     if (connection === "close") {
       pret = false;
-      const code = lastDisconnect && lastDisconnect.error && lastDisconnect.error.output
-        ? lastDisconnect.error.output.statusCode
-        : null;
+      const code =
+        lastDisconnect && lastDisconnect.error && lastDisconnect.error.output
+          ? lastDisconnect.error.output.statusCode
+          : null;
 
       if (code === DisconnectReason.loggedOut) {
         console.error(
@@ -230,6 +248,10 @@ async function demarrer() {
           (m.message.extendedTextMessage && m.message.extendedTextMessage.text) ||
           null;
 
+        // Le client voit tout de suite que le message est lu et qu'une réponse arrive
+        sock.readMessages([m.key]).catch(() => {});
+        sock.sendPresenceUpdate("composing", from).catch(() => {});
+
         await bot.traiterMessageEntrant({
           id: m.key.id,
           from,
@@ -243,7 +265,7 @@ async function demarrer() {
   });
 }
 
-// Petit serveur HTTP : Render en a besoin, et un service de ping peut le réveiller
+// Petit serveur HTTP : Render en a besoin, et UptimeRobot peut le réveiller
 http
   .createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
