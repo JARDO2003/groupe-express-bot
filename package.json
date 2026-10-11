@@ -1,18 +1,16 @@
 {
   "name": "groupe-express-bot",
   "version": "1.0.0",
-  "private": true,
+  "description": "Robot WhatsApp de commandes de repas Groupe Express et Express Market",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=18"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "latest",
-    "firebase-admin": "^12.0.0",
-    "pino": "^9.0.0",
-    "qrcode-terminal": "^0.12.0"
+    "@whiskeysockets/baileys": "^6.7.0",
+    "firebase-admin": "^12.0.0"
   }
 }
