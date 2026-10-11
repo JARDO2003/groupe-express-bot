@@ -1417,5 +1417,6 @@ async function traiterMessageEntrant(msg) {
 }
 
 demarrerExpressSend();
+require("./express-market").demarrer();
 
 module.exports = { setTransport, traiterMessageEntrant, traiterFile, envoyerRappels, traiterExpressSend };
