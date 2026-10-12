@@ -160,12 +160,41 @@ function salutation() {
   return h >= 18 || h < 4 ? "Bonsoir" : "Bonjour";
 }
 
-function menuTexte() {
-  return (
-    `${salutation()} chers clients 👋\nBienvenue chez Groupe Express 🍽️\n\n` +
-    `Voici notre menu :\n\n` +
-    menuBloc()
-  );
+// Plats du jour : les plats de la catégorie « Plats du jour » (ses plats se gèrent depuis la page admin)
+const REGEX_CAT_JOUR = /plats?\s+du\s+jour/;
+
+function platsDuJour() {
+  return PLATS.filter(p => REGEX_CAT_JOUR.test(normaliser(p.categorie)));
+}
+
+// Présentation d'accueil : les plats du jour (tout le menu si cette catégorie n'existe pas)
+function accueilBloc() {
+  if (!PLATS.length) return menuBloc();
+
+  const jour = platsDuJour();
+  if (!jour.length) return menuBloc();
+
+  const lignes = jour.map(p => `*${p.lettre}* ➜ ${prixTexte(p)} - ${p.nom}`).join("\n");
+
+  const fin = commandesOuvertes()
+    ? `👉 Pour commander, répondez par la lettre du plat choisi (A, B, C…) 😊`
+    : `⏰ Les commandes sont closes pour aujourd'hui (fermeture à ${HEURE_LIMITE}h). Revenez demain avant ${HEURE_LIMITE}h 😊`;
+
+  const toutVoir = PLATS.length > jour.length
+    ? `\n📋 Écrivez *menu* pour voir tous nos plats.`
+    : "";
+
+  return `🍲 *Nos plats du jour*\n\n${lignes}\n\n${fin}${toutVoir}`;
+}
+
+function accueilTexte(nomClient) {
+  const prenom = nomClient ? String(nomClient).trim().split(/\s+/)[0] : null;
+
+  const entete = prenom
+    ? `${salutation()} ${prenom} 👋\nContent de vous revoir chez Groupe Express 🍽️`
+    : `${salutation()} chers clients 👋\nBienvenue chez Groupe Express 🍽️`;
+
+  return `${entete}\n\n${accueilBloc()}`;
 }
 
 // ===============================
@@ -283,6 +312,30 @@ const MOTS_QUESTION = [
 
 // Détecte une réponse de l'IA qui redemande le nom ou le numéro
 const REGEX_DEMANDE_INFOS = /(nom|pr[ée]nom|num[ée]ro|t[ée]l[ée]phone)/i;
+
+// Le client dit seulement bonjour (ex : "cc", "bjr", "bonsoir comment allez-vous")
+const SALUTS = /^(bonjour|bjr|bonsoir|bsr|salut|slt|cc|coucou|hello|hey|yo|salam)\b/;
+
+function estSalutSimple(texte) {
+  const t = normaliser(texte);
+  if (!SALUTS.test(t)) return false;
+
+  const mots = t
+    .replace(SALUTS, " ")
+    .replace(/[^a-z0-9 ]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+
+  // Un salut suivi d'une question ou d'un numéro n'est pas un simple salut
+  return mots.length <= 3 && !mots.some(m => /\d/.test(m) || MOTS_QUESTION.includes(m));
+}
+
+// Le client demande les plats du jour ou le menu complet
+const REGEX_PLATS_JOUR = /\b(plats?|menu)\s+du\s+jour\b/;
+const REGEX_VEUT_MENU = /\b(menu|carte)\b/;
+
+// L'IA annonce le menu sans cocher "montrer_menu" : le code ajoute quand même la liste
+const MENTIONNE_MENU = /(voici|voil[àa]|d[ée]couvrez|regardez|consultez).{0,40}\b(menu|plats?|carte)\b/i;
 
 // "madani 0567890612" -> "madani" (le texte qui reste à côté du numéro)
 function nomDepuisMessage(texte) {
@@ -627,7 +680,8 @@ COMMENT TU AIDES À COMMANDER :
 - Si le client veut annuler ou recommencer sa saisie en cours, mets "annuler" à true.
 - Si le client demande où en est sa commande, appuie-toi sur la liste "Commandes du client aujourd'hui" ci-dessous.
 - Si le client demande une chose que tu ne sais pas, ou une modification/annulation d'une commande déjà enregistrée, ou fait une réclamation : explique simplement que tu n'as pas l'information, et mets dans "a_transmettre" un résumé court de sa demande. Le système préviendra l'équipe : ne le dis pas toi-même.
-- Si tu dois montrer le menu (premier message, demande de menu/plats/prix), mets "montrer_menu" à true et fais seulement une courte phrase d'accueil : le système ajoute la liste lui-même, ne la recopie pas.
+- Si le client veut voir les plats ou le menu (même en un mot : "montre", "montre moi", "je veux voir", "c'est quoi vos plats", "vous avez quoi"), ou si tu viens de lui proposer de les montrer, mets "montrer_menu" à true et fais seulement une courte phrase : le système ajoute la liste lui-même, ne la recopie pas et n'écris jamais "voici le menu" sans mettre "montrer_menu" à true.
+- Premier message d'un client : s'il pose une question, réponds-y en une ou deux phrases ; le système affiche ensuite lui-même les plats du jour, ne les recopie pas. Sois vif : relie ce que le client dit à ce qu'il a déjà dit dans la conversation récente.
 - Si le client demande qui a conçu/créé/développé ce programme ou ce chatbot : mets "image" à "createur" et dans "reponse" présente ZINZINDOHOUE MARCIO JARDEL (le texte sera envoyé avec sa photo).
 - Si le client demande qui est le responsable, le patron, le chef ou le dirigeant de Groupe Express : mets "image" à "responsable" et dans "reponse" présente KOLO DAGNOGO (le texte sera envoyé avec sa photo).
 - Dans tous les autres cas, "image" reste null.
@@ -866,14 +920,24 @@ async function traiterMessage(from, texteBrut) {
     etat.contact = etat.contact || profil.contact;
   }
 
-  const estSalut = /^(bonjour|bjr|bonsoir|bsr|salut|slt|cc|coucou|hello|hey|menu|plats?)\b/.test(
-    normaliser(texte)
-  );
+  const t = normaliser(texte);
+  const premierContact = etat.hist.length === 0;
 
-  // Premier message : bienvenue + menu seulement si c'est un simple salut
-  if (etat.hist.length === 0 && !trouverPlat(texte) && (estSalut || texte.trim().length <= 3)) {
-    const accueil = menuTexte();
-    etat.hist.push({ r: "c", t: texte }, { r: "b", t: "Bienvenue + menu envoyé" });
+  // Le client demande les plats du jour ou le menu : réponse directe, sans dépendre de l'IA
+  if (REGEX_PLATS_JOUR.test(t) || (REGEX_VEUT_MENU.test(t) && t.length <= 60)) {
+    const reponseMenu = REGEX_PLATS_JOUR.test(t)
+      ? accueilBloc()
+      : `Voici notre menu complet 🍽️\n\n${menuBloc()}`;
+
+    etat.hist.push({ r: "c", t: texte }, { r: "b", t: "Menu envoyé" });
+    await ecrireEtat(from, { lettre: etat.lettre, nom: etat.nom, contact: etat.contact, avisAttendu: etat.avisAttendu, hist: etat.hist });
+    return reponseMenu;
+  }
+
+  // Premier contact ou simple salut : accueil + plats du jour (sauf si une commande est en cours de saisie)
+  if (!etat.lettre && !trouverPlat(texte) && (estSalutSimple(texte) || (premierContact && texte.trim().length <= 3))) {
+    const accueil = accueilTexte(profil && profil.nom);
+    etat.hist.push({ r: "c", t: texte }, { r: "b", t: "Accueil + plats du jour envoyés" });
     await ecrireEtat(from, { lettre: null, nom: null, contact: null, avisAttendu: etat.avisAttendu, hist: etat.hist });
     return accueil;
   }
@@ -999,18 +1063,32 @@ async function traiterMessage(from, texteBrut) {
     // Nom ou numéro reçus mais aucun plat choisi : on demande le plat
     const infoSansPlat = !plat && Boolean(nomPropre || telephone);
 
+    let accueilInclus = false;
+
     if (infoSansPlat && (!dite || REGEX_DEMANDE_INFOS.test(dite))) {
       reponse = "Merci 😊 Quel plat souhaitez-vous ? Répondez par sa lettre (A, B, C…).";
+    } else if (dite) {
+      reponse = dite;
+    } else if (plat) {
+      reponse = demanderInfos(plat, nom, contact);
     } else {
-      reponse = dite
-        ? dite
-        : plat
-        ? demanderInfos(plat, nom, contact)
-        : menuTexte();
+      reponse = accueilTexte(profil && profil.nom);
+      accueilInclus = true;
     }
 
-    if (decision.montrer_menu === true && !infoRecue && !infoSansPlat) {
-      reponse += "\n\n" + menuBloc();
+    // L'IA annonce le menu : le code ajoute la liste, même si elle a oublié de cocher "montrer_menu"
+    const veutListe =
+      decision.montrer_menu === true ||
+      Boolean(dite && !dite.includes("➜") && MENTIONNE_MENU.test(dite));
+
+    if (!accueilInclus && !infoRecue && !infoSansPlat) {
+      if (veutListe) {
+        // Premier contact : d'abord les plats du jour ; ensuite, le menu complet
+        reponse += "\n\n" + (premierContact ? accueilBloc() : menuBloc());
+      } else if (premierContact && !plat) {
+        // Premier message qui n'est pas un salut : l'IA répond, puis les plats du jour sont présentés
+        reponse += "\n\n" + accueilBloc();
+      }
     }
 
     let avisTexte =
