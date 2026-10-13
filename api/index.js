@@ -1,7 +1,7 @@
 const crypto = require("crypto");
 
 const { initializeApp, cert, getApps } = require("firebase-admin/app");
-const { getFirestore } = require("firebase-admin/firestore");
+const { getFirestore, FieldValue } = require("firebase-admin/firestore");
 const { getDatabase } = require("firebase-admin/database");
 
 // ===============================
@@ -37,8 +37,11 @@ const GEMINI_TIMEOUT_MS = 9000;
 const FUSEAU = "Africa/Abidjan";
 const HEURE_RAPPEL_TEXTE = "12h";
 
-// Les commandes sont bloquées à partir de cette heure (heure d'Abidjan)
-const HEURE_LIMITE = 10;
+// Commandes fermées de 11h à 16h. Ouvertes de 16h à 11h le lendemain.
+// Une commande passée à partir de 16h est pour le lendemain.
+const HEURE_FERMETURE = 11;
+const HEURE_REOUVERTURE = 16;
+const POINTS_PAR_COMMANDE = 0; // à changer le jour où la fidélité démarre (ex : 1)
 
 const MAX_MESSAGE = 600;   // longueur maximale lue pour un message client
 const MAX_HISTORIQUE = 12; // nombre de messages gardés en mémoire
@@ -134,11 +137,7 @@ function menuLignes() {
 function menuBloc() {
   if (!PLATS.length) return "Notre menu est en cours de mise à jour, revenez dans un instant 😊";
 
-  const fin = commandesOuvertes()
-    ? `👉 Pour commander, répondez par la lettre du plat choisi (A, B, C…) 😊`
-    : `⏰ Les commandes sont closes pour aujourd'hui (fermeture à ${HEURE_LIMITE}h). Revenez demain avant ${HEURE_LIMITE}h 😊`;
-
-  return `${menuLignes()}\n\n${fin}`;
+  return `${menuLignes()}\n\n${finCommande()}`;
 }
 
 // Heure actuelle à Abidjan (0 à 23)
@@ -150,9 +149,31 @@ function heureCourante() {
   );
 }
 
-// Les commandes sont ouvertes jusqu'à HEURE_LIMITE (exclue)
+// Ouvert de 16h à 11h le lendemain, fermé de 11h à 16h
 function commandesOuvertes() {
-  return heureCourante() < HEURE_LIMITE;
+  const h = heureCourante();
+  return h < HEURE_FERMETURE || h >= HEURE_REOUVERTURE;
+}
+
+// À partir de 16h, la commande est pour le lendemain
+function commandePourDemain() {
+  return heureCourante() >= HEURE_REOUVERTURE;
+}
+
+// Jour pour lequel la commande est préparée
+function dateService() {
+  if (!commandePourDemain()) return dateJour();
+  return new Intl.DateTimeFormat("en-CA", { timeZone: FUSEAU }).format(
+    new Date(Date.now() + 24 * 3600 * 1000)
+  );
+}
+
+function finCommande() {
+  if (!commandesOuvertes()) {
+    return `⏰ Les commandes sont closes pour le moment (fermées de ${HEURE_FERMETURE}h à ${HEURE_REOUVERTURE}h). Elles rouvrent à ${HEURE_REOUVERTURE}h pour la commande du lendemain 😊`;
+  }
+  return `👉 Pour commander, répondez par la lettre du plat choisi (A, B, C…)` +
+    (commandePourDemain() ? ` (commande pour demain)` : ``) + ` 😊`;
 }
 
 function salutation() {
@@ -176,9 +197,7 @@ function accueilBloc() {
 
   const lignes = jour.map(p => `*${p.lettre}* ➜ ${prixTexte(p)} - ${p.nom}`).join("\n");
 
-  const fin = commandesOuvertes()
-    ? `👉 Pour commander, répondez par la lettre du plat choisi (A, B, C…) 😊`
-    : `⏰ Les commandes sont closes pour aujourd'hui (fermeture à ${HEURE_LIMITE}h). Revenez demain avant ${HEURE_LIMITE}h 😊`;
+  const fin = finCommande();
 
   const toutVoir = PLATS.length > jour.length
     ? `\n📋 Écrivez *menu* pour voir tous nos plats.`
@@ -404,7 +423,8 @@ async function ecrireEtat(from, etat) {
 }
 
 // ===============================
-// PROFIL CLIENT (collection "clients" : nom et numéro retenus après une commande, sans expiration)
+// PROFIL CLIENT (collection "clients" : une fiche par client, sans expiration)
+// Champs : nom, contact, nbCommandes, totalDepense, points, premierContact, derniereCommande
 // ===============================
 
 async function lireClient(from) {
@@ -419,10 +439,40 @@ async function lireClient(from) {
   }
 }
 
-async function ecrireClient(from, nom, contact) {
+// Fiche créée dès le premier message du client
+async function creerClient(from) {
+  try {
+    await firestore.collection("clients").doc(from).create({
+      chatId: from,
+      nom: null,
+      contact: null,
+      nbCommandes: 0,
+      totalDepense: 0,
+      points: 0,
+      premierContact: new Date().toISOString(),
+      maj: Date.now()
+    });
+  } catch (error) {
+    if (!(error.code === 6 || /ALREADY_EXISTS/.test(error.message))) {
+      console.error("Fiche client non créée :", error.message);
+    }
+  }
+}
+
+// Après chaque commande validée : nom, numéro, compteurs et points
+async function ecrireClient(from, nom, contact, plat) {
   try {
     await firestore.collection("clients").doc(from).set(
-      { nom: nom, contact: contact, maj: Date.now() },
+      {
+        chatId: from,
+        nom: nom,
+        contact: contact,
+        maj: Date.now(),
+        derniereCommande: new Date().toISOString(),
+        nbCommandes: FieldValue.increment(1),
+        totalDepense: FieldValue.increment(Number(plat && plat.prix) || 0),
+        points: FieldValue.increment(POINTS_PAR_COMMANDE)
+      },
       { merge: true }
     );
   } catch (error) {
@@ -430,20 +480,25 @@ async function ecrireClient(from, nom, contact) {
   }
 }
 
+// "changer" : on oublie seulement le nom et le numéro, l'historique et les points restent
 async function oublierClient(from) {
   try {
-    await firestore.collection("clients").doc(from).delete();
+    await firestore.collection("clients").doc(from).set(
+      { nom: null, contact: null, maj: Date.now() },
+      { merge: true }
+    );
   } catch (error) {
-    console.error("Profil client non supprimé :", error.message);
+    console.error("Profil client non modifié :", error.message);
   }
 }
 
+// Commandes du client pour aujourd'hui et, après 16h, pour demain
 async function commandesDuJour(from) {
   try {
     const snapshot = await firestore
       .collection("commandes")
       .where("chatId", "==", from)
-      .where("jour", "==", dateJour())
+      .where("jour", "in", [...new Set([dateJour(), dateService()])])
       .get();
 
     const liste = [];
@@ -505,7 +560,7 @@ async function enregistrerCommande(chatId, plat, nom, contact, source = "whatsap
         source: source,
         nom: nom,
         contact: contact,
-        jour: dateJour(),
+        jour: dateService(),
         date: new Date().toISOString(),
         statut: "en_attente",
         // ExpressSend actif : la commande part chez le fournisseur du plat
@@ -622,8 +677,8 @@ function construirePrompt(texte, etat, commandes, profil) {
     : "Aucune commande aujourd'hui.";
 
   const fermeture = commandesOuvertes()
-    ? `- Les commandes sont ouvertes jusqu'à ${HEURE_LIMITE}h chaque jour.`
-    : `- LES COMMANDES SONT FERMÉES pour aujourd'hui (fermeture à ${HEURE_LIMITE}h). N'accepte aucune commande : laisse "plat" à null et invite gentiment le client à revenir demain avant ${HEURE_LIMITE}h. Tu peux toujours répondre à ses questions.`;
+    ? `- Les commandes sont ouvertes de ${HEURE_REOUVERTURE}h jusqu'à ${HEURE_FERMETURE}h le lendemain. ${commandePourDemain() ? "En ce moment, toute commande est pour DEMAIN : dis-le au client." : "Les commandes passées maintenant sont pour aujourd'hui."}`
+    : `- LES COMMANDES SONT FERMÉES (de ${HEURE_FERMETURE}h à ${HEURE_REOUVERTURE}h). N'accepte aucune commande : laisse "plat" à null et invite gentiment le client à revenir à partir de ${HEURE_REOUVERTURE}h pour commander pour le lendemain. Tu peux toujours répondre à ses questions.`;
 
   return `
 Tu es l'assistant WhatsApp de Groupe Express, un service de vente de repas à emporter (retrait sur place) en Côte d'Ivoire.
@@ -879,8 +934,8 @@ const sendWhatsAppImage = (to, url, legende) =>
 // Commandes closes : on vide la saisie en cours et on prévient le client
 async function refuserCommande(from, texte, etat) {
   const reponse =
-    `Désolé 😊 Les commandes sont closes pour aujourd'hui (fermeture à ${HEURE_LIMITE}h).\n` +
-    `Revenez demain avant ${HEURE_LIMITE}h, nous serons ravis de vous servir 🍽️`;
+    `Désolé 😊 Les commandes sont closes pour le moment (fermées de ${HEURE_FERMETURE}h à ${HEURE_REOUVERTURE}h).\n` +
+    `Elles rouvrent à ${HEURE_REOUVERTURE}h pour la commande du lendemain 🍽️`;
 
   etat.hist.push({ r: "c", t: texte }, { r: "b", t: "Commandes fermées" });
 
@@ -914,6 +969,9 @@ async function traiterMessage(from, texteBrut) {
 
   // Client déjà connu : on reprend son nom et son numéro
   const profil = await lireClient(from);
+
+  // Nouveau client : sa fiche est créée dès le premier message
+  if (!profil) await creerClient(from);
 
   if (profil) {
     etat.nom = etat.nom || profil.nom;
@@ -1021,8 +1079,8 @@ async function traiterMessage(from, texteBrut) {
     // Commande complète : le code la confirme lui-même, avec son code
     const code = await enregistrerCommande(from, plat, nom, contact);
 
-    // On retient le client pour ses prochaines commandes
-    await ecrireClient(from, nom, contact);
+    // On retient le client (nom, numéro, nombre de commandes, total dépensé, points)
+    await ecrireClient(from, nom, contact, plat);
 
     reponse = [
       `✅ Commande validée !\n\n` +
@@ -1031,7 +1089,7 @@ async function traiterMessage(from, texteBrut) {
         `👤 ${nom}\n` +
         `📞 ${contact}\n\n` +
         `Gardez bien ce code : il vous sera demandé à la livraison de votre plat 📦\n` +
-        `Nous vous écrirons à ${HEURE_RAPPEL_TEXTE} dès que votre repas est prêt.\n\n` +
+        `Nous vous écrirons ${commandePourDemain() ? "demain " : ""}à ${HEURE_RAPPEL_TEXTE} dès que votre repas est prêt.\n\n` +
         `Ce n'est pas votre nom ou votre numéro ? Écrivez « changer » pour les modifier.`,
       `Merci pour votre confiance ${nom} 😊\n\n` +
         `Pour finir, que pensez-vous de Groupe Express ? ` +
