@@ -206,14 +206,19 @@ function accueilBloc() {
   return `🍲 *Nos plats du jour*\n\n${lignes}\n\n${fin}${toutVoir}`;
 }
 
-function accueilTexte(nomClient) {
+// Accueil personnalisé : le client connu est appelé par son prénom et peut recommander en un mot
+function accueilTexte(nomClient, dernierPlat) {
   const prenom = nomClient ? String(nomClient).trim().split(/\s+/)[0] : null;
 
   const entete = prenom
     ? `${salutation()} ${prenom} 👋\nContent de vous revoir chez Groupe Express 🍽️`
     : `${salutation()} chers clients 👋\nBienvenue chez Groupe Express 🍽️`;
 
-  return `${entete}\n\n${accueilBloc()}`;
+  const rapide = prenom && dernierPlat && commandesOuvertes()
+    ? `\n\n🔁 Écrivez *même chose* pour recommander : ${dernierPlat}`
+    : "";
+
+  return `${entete}${rapide}\n\n${accueilBloc()}`;
 }
 
 // ===============================
@@ -353,6 +358,9 @@ function estSalutSimple(texte) {
 const REGEX_PLATS_JOUR = /\b(plats?|menu)\s+du\s+jour\b/;
 const REGEX_VEUT_MENU = /\b(menu|carte)\b/;
 
+// Le client veut recommander son dernier plat ("même chose", "comme d'habitude")
+const REGEX_HABITUDE = /\b(meme chose|la meme|comme d.?habitude|habituel|pareil|encore)\b/;
+
 // L'IA annonce le menu sans cocher "montrer_menu" : le code ajoute quand même la liste
 const MENTIONNE_MENU = /(voici|voil[àa]|d[ée]couvrez|regardez|consultez).{0,40}\b(menu|plats?|carte)\b/i;
 
@@ -424,7 +432,8 @@ async function ecrireEtat(from, etat) {
 
 // ===============================
 // PROFIL CLIENT (collection "clients" : une fiche par client, sans expiration)
-// Champs : nom, contact, nbCommandes, totalDepense, points, premierContact, derniereCommande
+// Champs : nom, contact, nbCommandes, totalDepense, points, premierContact, derniereCommande,
+//          dernierPlatId, dernierPlatNom
 // ===============================
 
 async function lireClient(from) {
@@ -432,7 +441,12 @@ async function lireClient(from) {
     const d = await firestore.collection("clients").doc(from).get();
     if (!d.exists) return null;
     const c = d.data();
-    return { nom: c.nom || null, contact: c.contact || null };
+    return {
+      nom: c.nom || null,
+      contact: c.contact || null,
+      dernierPlatId: c.dernierPlatId || null,
+      dernierPlatNom: c.dernierPlatNom || null
+    };
   } catch (error) {
     console.error("Lecture du profil client :", error.message);
     return null;
@@ -459,7 +473,19 @@ async function creerClient(from) {
   }
 }
 
-// Après chaque commande validée : nom, numéro, compteurs et points
+// Dès que le client donne son nom ou son numéro, on les retient (même si la commande n'est pas finie)
+async function memoriserIdentite(from, nom, contact) {
+  try {
+    const maj = { maj: Date.now() };
+    if (nom) maj.nom = nom;
+    if (contact) maj.contact = contact;
+    await firestore.collection("clients").doc(from).set(maj, { merge: true });
+  } catch (error) {
+    console.error("Identité non mémorisée :", error.message);
+  }
+}
+
+// Après chaque commande validée : nom, numéro, dernier plat, compteurs et points
 async function ecrireClient(from, nom, contact, plat) {
   try {
     await firestore.collection("clients").doc(from).set(
@@ -467,6 +493,8 @@ async function ecrireClient(from, nom, contact, plat) {
         chatId: from,
         nom: nom,
         contact: contact,
+        dernierPlatId: (plat && plat.id) || null,
+        dernierPlatNom: (plat && plat.nom) || null,
         maj: Date.now(),
         derniereCommande: new Date().toISOString(),
         nbCommandes: FieldValue.increment(1),
@@ -667,7 +695,11 @@ function construirePrompt(texte, etat, commandes, profil) {
 
   const connu =
     profil && profil.nom && profil.contact
-      ? `Client déjà connu : ${profil.nom}. Son nom et son numéro sont retenus : s'il choisit un plat, le système valide la commande directement, ne lui demande rien.`
+      ? `Client déjà connu : ${profil.nom}.` +
+        (profil.dernierPlatNom
+          ? ` Dernier plat commandé : ${profil.dernierPlatNom} (il peut écrire « même chose » pour le recommander, le système s'en charge).`
+          : "") +
+        ` Son nom et son numéro sont retenus : s'il choisit un plat, le système valide la commande directement, ne lui demande rien.`
       : "Nouveau client (nom et numéro encore inconnus).";
 
   const deja = commandes.length
@@ -981,6 +1013,12 @@ async function traiterMessage(from, texteBrut) {
   const t = normaliser(texte);
   const premierContact = etat.hist.length === 0;
 
+  // "même chose" / "comme d'habitude" : on reprend le dernier plat commandé (s'il est encore au menu)
+  const platHabituel =
+    profil && profil.dernierPlatId && t.length <= 40 && REGEX_HABITUDE.test(t)
+      ? PLATS.find(p => p.id === profil.dernierPlatId) || null
+      : null;
+
   // Le client demande les plats du jour ou le menu : réponse directe, sans dépendre de l'IA
   if (REGEX_PLATS_JOUR.test(t) || (REGEX_VEUT_MENU.test(t) && t.length <= 60)) {
     const reponseMenu = REGEX_PLATS_JOUR.test(t)
@@ -994,14 +1032,14 @@ async function traiterMessage(from, texteBrut) {
 
   // Premier contact ou simple salut : accueil + plats du jour (sauf si une commande est en cours de saisie)
   if (!etat.lettre && !trouverPlat(texte) && (estSalutSimple(texte) || (premierContact && texte.trim().length <= 3))) {
-    const accueil = accueilTexte(profil && profil.nom);
+    const accueil = accueilTexte(profil && profil.nom, profil && profil.dernierPlatNom);
     etat.hist.push({ r: "c", t: texte }, { r: "b", t: "Accueil + plats du jour envoyés" });
     await ecrireEtat(from, { lettre: null, nom: null, contact: null, avisAttendu: etat.avisAttendu, hist: etat.hist });
     return accueil;
   }
 
   // Commandes closes : on évite même d'appeler Gemini si le client essaie clairement de commander
-  if (!ouvert && (trouverPlat(texte) || (etat.lettre && extraireTelephone(texte)))) {
+  if (!ouvert && (trouverPlat(texte) || platHabituel || (etat.lettre && extraireTelephone(texte)))) {
     return await refuserCommande(from, texte, etat);
   }
 
@@ -1048,6 +1086,7 @@ async function traiterMessage(from, texteBrut) {
   // La lettre est d'abord détectée par le code (fiable), Gemini ne sert que de renfort
   const platDemande =
     trouverPlat(texte) ||
+    platHabituel ||
     PLATS.find(p => p.lettre === String(decision.plat || "").trim().toUpperCase());
 
   if (platDemande) {
@@ -1068,6 +1107,9 @@ async function traiterMessage(from, texteBrut) {
   if (nomPropre) nom = nomPropre;
   if (telephone) contact = telephone;
 
+  // On retient tout de suite le nom / numéro donnés, même si la commande n'est pas terminée
+  if (nomPropre || telephone) await memoriserIdentite(from, nomPropre, telephone);
+
   const plat = PLATS.find(p => p.lettre === lettre);
 
   // Commandes closes : aucune commande ne doit passer
@@ -1079,7 +1121,7 @@ async function traiterMessage(from, texteBrut) {
     // Commande complète : le code la confirme lui-même, avec son code
     const code = await enregistrerCommande(from, plat, nom, contact);
 
-    // On retient le client (nom, numéro, nombre de commandes, total dépensé, points)
+    // On retient le client (nom, numéro, dernier plat, nombre de commandes, total dépensé, points)
     await ecrireClient(from, nom, contact, plat);
 
     reponse = [
@@ -1090,6 +1132,7 @@ async function traiterMessage(from, texteBrut) {
         `📞 ${contact}\n\n` +
         `Gardez bien ce code : il vous sera demandé à la livraison de votre plat 📦\n` +
         `Nous vous écrirons ${commandePourDemain() ? "demain " : ""}à ${HEURE_RAPPEL_TEXTE} dès que votre repas est prêt.\n\n` +
+        `🔁 La prochaine fois, écrivez *même chose* pour recommander ce plat.\n` +
         `Ce n'est pas votre nom ou votre numéro ? Écrivez « changer » pour les modifier.`,
       `Merci pour votre confiance ${nom} 😊\n\n` +
         `Pour finir, que pensez-vous de Groupe Express ? ` +
@@ -1130,7 +1173,7 @@ async function traiterMessage(from, texteBrut) {
     } else if (plat) {
       reponse = demanderInfos(plat, nom, contact);
     } else {
-      reponse = accueilTexte(profil && profil.nom);
+      reponse = accueilTexte(profil && profil.nom, profil && profil.dernierPlatNom);
       accueilInclus = true;
     }
 
