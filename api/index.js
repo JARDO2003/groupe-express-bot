@@ -42,6 +42,12 @@ const DUREE_ETAT_MS = 6 * 60 * 60 * 1000;
 const PAUSE_LONGUE_MS = 30 * 60 * 1000; // au-delà, un "cc" relance l'accueil + menu
 const MAX_LIGNES = 15; // plats différents dans un panier
 const MAX_QTE = 20;    // quantité maximale par ligne
+const SERVICE_CLIENT = "0719480884"; // téléphone du service client (souci, réclamation ou sujet hors commande)
+
+// Redirection vers le service client : le numéro vient de SERVICE_CLIENT, jamais inventé
+function contactService() {
+  return `📞 Service client Groupe Express : ${SERVICE_CLIENT} (appelez-nous, on vous répond rapidement)`;
+}
 
 // ===============================
 // MENU (collection Firestore "plats", géré uniquement depuis la page admin)
@@ -718,6 +724,7 @@ ${menuLignes()}
 - Le client peut commander plusieurs plats avec des quantités dans un seul message, en écrivant librement. Il donne aussi son nom et son numéro de téléphone (un seul nom suffit).
 - Quand la commande est validée, le client reçoit un code de livraison (GE-XXXX) à présenter à la remise, puis le système lui demande son avis sur Groupe Express.
 - Les plats se récupèrent sur place : à ${HEURE_RAPPEL_TEXTE}, un message prévient les clients de venir récupérer leurs plats.
+- Service client (téléphone) : ${SERVICE_CLIENT}. C'est LE numéro à donner quand le client a un souci ou parle d'autre chose que commander un repas. Donne-le tel quel, ne le modifie jamais et n'invente aucun autre numéro.
 - Tu ne connais PAS : l'adresse exacte, les horaires d'ouverture, les moyens de paiement, les tarifs de livraison, la composition ou la taille des plats, les promotions, les délais précis, ni les boissons si elles ne sont pas au menu. Ne les invente JAMAIS.
 
 À PROPOS DE GROUPE EXPRESS (tu peux en parler en détail, avec tes propres mots, quand on te le demande) :
@@ -742,8 +749,9 @@ COMPRENDRE LES CLIENTS :
 - Réponses courtes (2 à 5 lignes) pour les échanges normaux. MAIS si le client demande ce qu'est Groupe Express, sa mission, son histoire ou ses valeurs, réponds en détail (une présentation complète et chaleureuse, avec les points forts en liste et des emojis). Si le client te pose une question générale, réponds-lui utilement et naturellement, sans tout ramener à la commande ; propose le menu seulement quand c'est pertinent.
 - Tu es vif, malin et nuancé : tu relies les informations, tu anticipes ce que le client veut vraiment.
 - Quelques emojis 🍽️📦😊 sans exagérer, style WhatsApp.
-- Si le client est mécontent, reste calme et poli, excuse-toi simplement et propose de transmettre sa remarque.
-- Si le sujet n'a rien à voir avec Groupe Express, réponds brièvement et poliment, puis ramène la conversation vers les repas.
+- Si le client est mécontent, reste calme et poli, excuse-toi simplement, propose de transmettre sa remarque et donne-lui le numéro du service client ${SERVICE_CLIENT}.
+- SOUCI : si le client rencontre un problème (plat manquant ou différent, erreur de prix ou de total, commande qui tarde, paiement, annulation ou modification d'une commande déjà validée, réclamation, ou toute demande que tu ne peux pas régler toi-même), excuse-toi simplement, rassure-le, puis invite-le à appeler le service client au ${SERVICE_CLIENT}.
+- HORS SUJET : si le client parle d'autre chose que les repas de Groupe Express, réponds brièvement et poliment, puis ramène la conversation vers les repas et donne-lui le numéro du service client ${SERVICE_CLIENT} s'il souhaite parler à une personne.
 
 COMMENT TU GÈRES LE PANIER :
 - Le panier actuel est affiché dans ÉTAT ACTUEL. Dans "articles_ajouter", mets UNIQUEMENT les plats nouveaux demandés dans CE message : une entrée par plat avec "plat" (la lettre), "quantite" (entier, 1 si non précisé) et "precision" (ex : "sans piment", sinon null). Ne répète jamais des plats déjà dans le panier.
@@ -758,7 +766,7 @@ COMMENT TU GÈRES LE PANIER :
 - Si le client veut annuler ou recommencer sa saisie en cours, mets "annuler" à true.
 - Les commandes déjà validées (liste ci-dessous) sont distinctes du panier : si le client veut commander "encore" quelque chose après une commande validée, c'est une NOUVELLE commande avec son propre code. Si ce n'est pas clair, demande-lui simplement s'il veut une nouvelle commande.
 - Si le client demande où en est sa commande ou son code, appuie-toi uniquement sur la liste "Commandes du client aujourd'hui" ci-dessous. Tu ne parles que des commandes de CE client.
-- Si le client demande une chose que tu ne sais pas, ou veut modifier/annuler une commande déjà validée, ou fait une réclamation, ou veut parler à un responsable : explique simplement que tu n'as pas l'information, et mets dans "a_transmettre" un résumé court de sa demande. Le système préviendra l'équipe : ne le dis pas toi-même.
+- Si le client demande une chose que tu ne sais pas, ou veut modifier/annuler une commande déjà validée, ou fait une réclamation, ou veut parler à un responsable : explique simplement que tu n'as pas l'information, et mets dans "a_transmettre" un résumé court de sa demande. Le système préviendra l'équipe : ne le dis pas toi-même. Dans "reponse", invite-le toujours à appeler le service client au ${SERVICE_CLIENT}.
 - Si tu dois montrer le menu (premier message, demande de menu/plats/prix), mets "montrer_menu" à true et fais seulement une courte phrase d'accueil : le système ajoute la liste lui-même, ne la recopie pas.
 - Si le client demande qui a conçu/créé/développé ce programme ou ce chatbot : mets "image" à "createur" et dans "reponse" présente ZINZINDOHOUE MARCIO JARDEL (le texte sera envoyé avec sa photo).
 - Si le client demande qui est le responsable, le patron, le chef ou le dirigeant de Groupe Express : mets "image" à "responsable" et dans "reponse" présente KOLO DAGNOGO (le texte sera envoyé avec sa photo).
@@ -1174,7 +1182,10 @@ async function traiterMessage(from, texteBrut, meta = {}) {
     if (typeof decision.a_transmettre === "string" && decision.a_transmettre.trim()) {
       const ok = await enregistrerDemande(from, nom, texte, decision.a_transmettre);
 
-      if (ok) reponse += "\n\n📝 J'ai transmis votre demande à l'équipe.";
+      if (ok) {
+        const note = `📝 J'ai transmis votre demande à l'équipe.\n${contactService()}`;
+        reponse = typeof reponse === "string" && reponse.trim() ? reponse + "\n\n" + note : note;
+      }
     }
   }
 
