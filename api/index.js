@@ -34,7 +34,20 @@ const IMAGES = {
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
 const GEMINI_TIMEOUT_MS = 9000;
 const FUSEAU = "Africa/Abidjan";
-const HEURE_RAPPEL_TEXTE = "12h";
+const HEURE_RAPPEL_TEXTE = "12h00"; // heure de retrait des plats
+const HEURE_FERMETURE = 11;   // à partir de 11h (heure d'Abidjan), plus de commandes
+const HEURE_REOUVERTURE = 17; // les commandes rouvrent à 17h
+
+function heureAbidjan() {
+  return Number(
+    new Intl.DateTimeFormat("en-GB", { timeZone: FUSEAU, hour: "2-digit", hour12: false }).format(new Date())
+  ) % 24;
+}
+
+function commandesFermees() {
+  const h = heureAbidjan();
+  return h >= HEURE_FERMETURE && h < HEURE_REOUVERTURE;
+}
 
 const MAX_MESSAGE = 600;
 const MAX_HISTORIQUE = 12;
@@ -192,16 +205,21 @@ function platDepuisRef(ref) {
   return PLATS.find(p => p.lettre === r.toUpperCase()) || trouverPlat(r);
 }
 
+// Numéro ivoirien : 10 chiffres (ex. 0172369740), avec ou sans +225 / 00225, espaces, points ou tirets
+function numeroIvoirien(brut) {
+  let c = String(brut || "").replace(/\D/g, "");
+  if (c.length === 15 && c.startsWith("00225")) c = c.slice(5);
+  else if (c.length === 13 && c.startsWith("225")) c = c.slice(3);
+  return /^\d{10}$/.test(c) ? c : null;
+}
+
 function extraireTelephone(texte) {
-  const tel = String(texte || "").match(/\+?\d[\d\s.\-]{6,}\d/);
-
-  if (!tel) return null;
-
-  const chiffres = tel[0].replace(/\D/g, "");
-
-  if (chiffres.length < 8 || chiffres.length > 15) return null;
-
-  return tel[0].replace(/[\s.\-]/g, "");
+  const candidats = String(texte || "").match(/\+?\d[\d\s.\-]{6,}\d/g) || [];
+  for (const cand of candidats) {
+    const n = numeroIvoirien(cand);
+    if (n) return n;
+  }
+  return null;
 }
 
 const MOTS_IGNORES = ["ok", "oui", "non", "merci", "svp", "stp"];
@@ -280,14 +298,10 @@ function nomDepuisMessage(texte) {
 
 function nettoyerContact(contact, corpusClient) {
   if (!contact || typeof contact !== "string") return null;
-
-  const chiffres = contact.replace(/\D/g, "");
-
-  if (chiffres.length < 8 || chiffres.length > 15) return null;
-
-  if (!String(corpusClient).replace(/\D/g, "").includes(chiffres)) return null;
-
-  return contact.replace(/[\s.\-]/g, "");
+  const n = numeroIvoirien(contact);
+  if (!n) return null;
+  if (!String(corpusClient).replace(/\D/g, "").includes(n)) return null;
+  return n;
 }
 
 // ===============================
@@ -388,7 +402,7 @@ function recapEtSuite(lignes, nom, contact) {
 
   let question;
   if (!nom && !contact) {
-    question = "Il me faut juste votre nom et votre numéro de téléphone (par exemple : Madani 0567890612)";
+    question = "Il me faut juste votre nom et votre numéro de téléphone (par exemple : Marcio 0172369740)";
   } else if (nom) {
     question = `Merci ${nom} 😊 Quel est votre numéro de téléphone ?`;
   } else {
@@ -723,6 +737,7 @@ ${menuLignes()}
 - Les lettres servent UNIQUEMENT à remplir les champs "plat". Ne les écris jamais au client : parle toujours des plats par leur nom. Le menu est montré au client en liste à puces, sans numéros : il écrit librement ce qu'il veut avec ses propres mots ; retrouve chaque plat par son nom (même mal écrit).
 - Le client peut commander plusieurs plats avec des quantités dans un seul message, en écrivant librement. Il donne aussi son nom et son numéro de téléphone (un seul nom suffit).
 - Quand la commande est validée, le client reçoit un code de livraison (GE-XXXX) à présenter à la remise, puis le système lui demande son avis sur Groupe Express.
+- Les commandes sont prises de ${HEURE_REOUVERTURE}h00 à ${HEURE_FERMETURE}h00 (heure d'Abidjan), fermées entre ${HEURE_FERMETURE}h00 et ${HEURE_REOUVERTURE}h00.
 - Les plats se récupèrent sur place : à ${HEURE_RAPPEL_TEXTE}, un message prévient les clients de venir récupérer leurs plats.
 - Service client (téléphone) : ${SERVICE_CLIENT}. C'est LE numéro à donner quand le client a un souci ou parle d'autre chose que commander un repas. Donne-le tel quel, ne le modifie jamais et n'invente aucun autre numéro.
 - Tu ne connais PAS : l'adresse exacte, les horaires d'ouverture, les moyens de paiement, les tarifs de livraison, la composition ou la taille des plats, les promotions, les délais précis, ni les boissons si elles ne sont pas au menu. Ne les invente JAMAIS.
@@ -759,7 +774,7 @@ COMMENT TU GÈRES LE PANIER :
 - Une seule commande peut contenir PLUSIEURS plats différents. Un client peut commander 2, 4, 6 plats ou plus dans un seul message ou en plusieurs messages : remplis une entrée par plat dans "articles_ajouter", ils vont tous dans le même panier. Tu ne fais que transmettre les plats et quantités : le système calcule la facture et enregistre la commande.
 - Si le client demande seulement une info sur un plat, ne touche pas au panier.
 - Quand tu modifies le panier, "reponse" doit être au plus UNE courte phrase (par exemple pour signaler un plat absent du menu) ou vide : le système affiche lui-même le récapitulatif et le total. Ne calcule JAMAIS de total, ne recopie pas le panier.
-- Il faut aussi un nom et un numéro de téléphone. Un seul nom OU prénom suffit. Remplis "nom" et "contact" uniquement avec ce que le client a réellement écrit, n'invente jamais. Ne les redemande jamais s'ils sont déjà dans ÉTAT ACTUEL. Un numéro peut s'écrire avec espaces, points, tirets ou indicatif : accepte-le tel quel.
+- Il faut aussi un nom et un numéro de téléphone. Un seul nom OU prénom suffit. Remplis "nom" et "contact" uniquement avec ce que le client a réellement écrit, n'invente jamais. Ne les redemande jamais s'ils sont déjà dans ÉTAT ACTUEL. Un numéro de Côte d'Ivoire a 10 chiffres (ex. 0172369740), parfois écrit avec espaces, points, tirets ou +225. S'il n'a pas 10 chiffres, laisse contact vide et redemande poliment un numéro à 10 chiffres.
 - Si le client donne le nom et le numéro d'un coup (ex : "madani 0567890612"), prends les deux. Si le client donne plat, quantités, nom et numéro dans un même message, remplis tout d'un coup.
 - Si le client hésite ou demande conseil, recommande 1 ou 2 plats du menu avec leur prix.
 - Ne dis JAMAIS que la commande est enregistrée ou validée et n'invente JAMAIS de code : le système le fait seulement après la confirmation du client. Mets "confirmer" à true uniquement si le client confirme clairement le récapitulatif déjà montré, sans rien modifier dans ce même message.
@@ -991,6 +1006,19 @@ async function traiterMessage(from, texteBrut, meta = {}) {
     await ecrireEtat(from, { panier: [], recap: false, nom: null, contact: null, avisAttendu: false, hist: etat.hist });
 
     return oubli;
+  }
+
+  // Commandes fermées de 11h à 17h (heure d'Abidjan)
+  if (commandesFermees()) {
+    const ferme =
+      `${salutation()} 👋 Les commandes sont fermées pour le moment ⏰\n` +
+      `• Les commandes s'arrêtent à ${HEURE_FERMETURE}h00\n` +
+      `• Elles rouvrent à ${HEURE_REOUVERTURE}h00 (heure d'Abidjan)\n` +
+      `• Retrait des plats : ${HEURE_RAPPEL_TEXTE}\n\n` +
+      `Revenez à partir de ${HEURE_REOUVERTURE}h00 pour commander 😊\n\n` + contactService();
+    etat.hist.push({ r: "c", t: texte }, { r: "b", t: "Commandes fermées" });
+    await ecrireEtat(from, { panier: [], recap: false, nom: etat.nom, contact: etat.contact, avisAttendu: etat.avisAttendu, hist: etat.hist });
+    return ferme;
   }
 
   if (profil) {
