@@ -184,6 +184,77 @@ function dateJour() {
   return new Intl.DateTimeFormat("en-CA", { timeZone: FUSEAU }).format(new Date());
 }
 
+const MOTS_VIDES_PLAT = [
+  "de", "du", "des", "la", "le", "les", "un", "une", "et", "avec", "au", "aux",
+  "a", "d", "l", "svp", "stp", "je", "veux", "voudrais", "prends", "prend", "moi"
+];
+
+function motsPlat(s) {
+  return normaliser(s)
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(" ")
+    .filter(m => m && !MOTS_VIDES_PLAT.includes(m));
+}
+
+function distanceEdition(a, b) {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      d[i][j] = Math.min(
+        d[i - 1][j] + 1,
+        d[i][j - 1] + 1,
+        d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+      );
+    }
+  }
+  return d[a.length][b.length];
+}
+
+function estSousSequence(petit, grand) {
+  let i = 0;
+  for (const c of grand) {
+    if (c === petit[i]) i++;
+    if (i === petit.length) return true;
+  }
+  return false;
+}
+
+// Compare un mot du client à un mot du plat : exact, début de mot ("gra" -> "graine"),
+// petite faute ("atieke" -> "attieke"), abréviation ("atk" -> "attieke")
+function scoreMot(q, m) {
+  if (q === m) return 1;
+  if (q.length >= 2 && m.startsWith(q)) return 0.9;
+  if (q.length >= 4 && distanceEdition(q, m) <= (q.length >= 7 ? 2 : 1)) return 0.8;
+  if (q.length >= 3 && q[0] === m[0] && estSousSequence(q, m)) return 0.7;
+  return 0;
+}
+
+function scorePlat(requete, nomPlat) {
+  const q = motsPlat(requete);
+  const m = motsPlat(nomPlat);
+  if (!q.length || !m.length) return 0;
+
+  const utilises = new Set();
+  let total = 0;
+
+  for (const w of q) {
+    let best = 0;
+    let bi = -1;
+    m.forEach((x, i) => {
+      if (utilises.has(i)) return;
+      const s = scoreMot(w, x);
+      if (s > best) { best = s; bi = i; }
+    });
+    if (best === 0) return 0; // un mot du client ne correspond à rien dans ce plat
+    utilises.add(bi);
+    total += best;
+  }
+
+  const couverture = utilises.size / m.length;
+  return (total / q.length) * (0.6 + 0.4 * couverture);
+}
+
 function trouverPlat(texte) {
   const t = normaliser(texte);
 
@@ -193,6 +264,19 @@ function trouverPlat(texte) {
       return n.includes(t) || t.includes(n);
     });
     if (trouves.length === 1) return trouves[0];
+  }
+
+  // Reconnaissance approximative : "sau gra" -> "Sauce graine"
+  if (t.length >= 3 && t.length <= 40) {
+    const classes = PLATS
+      .map(p => ({ p, s: scorePlat(t, p.nom) }))
+      .filter(x => x.s >= 0.5)
+      .sort((a, b) => b.s - a.s);
+
+    // On ne choisit que s'il n'y a pas d'ambiguïté ("sauce" seul -> plusieurs sauces -> null)
+    if (classes.length && (classes.length === 1 || classes[0].s - classes[1].s >= 0.1)) {
+      return classes[0].p;
+    }
   }
 
   return null;
@@ -758,6 +842,7 @@ COMPRENDRE LES CLIENTS :
 - Les clients écrivent souvent en français ivoirien, avec de l'argot (nouchi), des abréviations de SMS (bjr, bsr, slt, cc, stp, svp, cmb, kom, c koi, jveux...), des fautes, des mots collés, des majuscules ou des messages très courts.
 - Comprends l'intention même si le message est mal écrit. Si vraiment ambigu, pose UNE seule question courte et ciblée au lieu d'inventer.
 - Reconnais les plats malgré les fautes (attiéké/atieke, tchèpe/tchep, spag/spaghetti, garba...).
+- Le client n'écrit presque jamais le nom exact du menu : il raccourcit, tronque les mots, ne garde que le début ou les initiales (ex : "sau gra" = Sauce graine, "atk poisson" = Attiéké poisson, "poul brais" = poulet braisé). Cherche toujours le plat du menu qui correspond le mieux, même si le nom est incomplet ou déformé, et mets sa lettre dans "plat". Ne demande JAMAIS au client d'écrire le nom exact. Si UN SEUL plat est plausible, prends-le directement. Si DEUX plats ou plus sont plausibles (ex : "sauce" alors qu'il y a plusieurs sauces), pose UNE question courte en citant ces plats par leur nom, sans modifier le panier.
 - Si le client donne son avis, un compliment ou une critique sur les plats ou le service, copie-le fidèlement (court) dans "avis" et remercie-le chaleureusement. Ne mets dans "avis" que de vrais avis, jamais une question ni une commande.
 - Si le client parle d'un plat qui n'est pas au menu, dis-le gentiment (dans "reponse") et propose le menu. Ne prétends pas qu'il existe.
 - Réponds dans la langue du client (français par défaut), avec des mots simples. Vouvoie par défaut, tutoie si le client tutoie.
