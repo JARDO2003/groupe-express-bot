@@ -91,7 +91,7 @@ function prixTexte(p) {
   return (p.des ? "Dès " : "") + prixF(p.prix);
 }
 
-// Menu pour l'IA : lettre + numéro d'affichage (le client peut dire "le 3")
+// Menu pour l'IA : lettre interne (jamais montrée au client)
 function menuLignes() {
   let cat = null;
   let out = "";
@@ -101,13 +101,13 @@ function menuLignes() {
       cat = p.categorie;
       out += `\n*${cat}*\n`;
     }
-    out += `*${p.lettre}* (n°${i + 1}) ➜ ${prixTexte(p)} - ${p.nom}\n`;
+    out += `*${p.lettre}* ➜ ${prixTexte(p)} - ${p.nom}\n`;
   });
 
   return out.trim();
 }
 
-// Menu montré aux clients : numéroté, pour pouvoir répondre "je prends le 2"
+// Menu montré aux clients : liste à puces, le client écrit librement ce qu'il veut
 function menuLignesClient() {
   let cat = null;
   let out = "";
@@ -117,7 +117,7 @@ function menuLignesClient() {
       cat = p.categorie;
       out += `\n*${cat}*\n`;
     }
-    out += `${i + 1}. ${p.nom} : ${prixTexte(p)}\n`;
+    out += `• ${p.nom} : ${prixTexte(p)}\n`;
   });
 
   return out.trim();
@@ -128,7 +128,7 @@ function menuBloc() {
 
   return (
     `${menuLignesClient()}\n\n` +
-    `Dites-moi simplement ce que vous voulez avec les quantités (ex : 2 garbas et 1 attiéké poisson), je note tout 😊`
+    `Écrivez-moi tout simplement ce que vous voulez, vous pouvez prendre plusieurs plats en un seul message 😊`
   );
 }
 
@@ -712,9 +712,9 @@ Tu discutes comme un vrai vendeur sympathique : naturel, chaleureux, serviable, 
 Tu écris comme une personne de l'équipe qui répond sur WhatsApp : messages courts et naturels, comme dans une conversation entre deux personnes, sans formules toutes faites et sans te présenter toi-même comme un robot, une IA ou un assistant virtuel. Tu peux dire « l'équipe Groupe Express ». En revanche, si le client te demande sincèrement s'il parle à une personne ou à un robot, ne le nie JAMAIS : réponds simplement et honnêtement que tu es l'assistant virtuel de Groupe Express, puis propose de continuer à l'aider ou de transmettre sa demande à l'équipe.
 
 CE QUE TU SAIS (et rien de plus) :
-- Menu (lettre, numéro d'affichage ➜ prix - plat) :
+- Menu (lettre ➜ prix - plat) :
 ${menuLignes()}
-- Les lettres servent UNIQUEMENT à remplir les champs "plat". Ne les écris jamais au client : parle toujours des plats par leur nom. Le client peut parler d'un plat par son numéro d'affichage ("le 3", "le premier") : retrouve la lettre correspondante.
+- Les lettres servent UNIQUEMENT à remplir les champs "plat". Ne les écris jamais au client : parle toujours des plats par leur nom. Le menu est montré au client en liste à puces, sans numéros : il écrit librement ce qu'il veut avec ses propres mots ; retrouve chaque plat par son nom (même mal écrit).
 - Le client peut commander plusieurs plats avec des quantités dans un seul message, en écrivant librement. Il donne aussi son nom et son numéro de téléphone (un seul nom suffit).
 - Quand la commande est validée, le client reçoit un code de livraison (GE-XXXX) à présenter à la remise, puis le système lui demande son avis sur Groupe Express.
 - Les plats se récupèrent sur place : à ${HEURE_RAPPEL_TEXTE}, un message prévient les clients de venir récupérer leurs plats.
@@ -748,7 +748,7 @@ COMPRENDRE LES CLIENTS :
 COMMENT TU GÈRES LE PANIER :
 - Le panier actuel est affiché dans ÉTAT ACTUEL. Dans "articles_ajouter", mets UNIQUEMENT les plats nouveaux demandés dans CE message : une entrée par plat avec "plat" (la lettre), "quantite" (entier, 1 si non précisé) et "precision" (ex : "sans piment", sinon null). Ne répète jamais des plats déjà dans le panier.
 - Pour retirer ou diminuer : "articles_retirer" avec "plat" et "quantite" (null = retirer tout ce plat). Pour remplacer un plat par un autre : retire l'ancien ET ajoute le nouveau.
-- Un client peut commander 4, 6 plats ou plus dans un seul message : remplis une entrée par plat.
+- Une seule commande peut contenir PLUSIEURS plats différents. Un client peut commander 2, 4, 6 plats ou plus dans un seul message ou en plusieurs messages : remplis une entrée par plat dans "articles_ajouter", ils vont tous dans le même panier. Tu ne fais que transmettre les plats et quantités : le système calcule la facture et enregistre la commande.
 - Si le client demande seulement une info sur un plat, ne touche pas au panier.
 - Quand tu modifies le panier, "reponse" doit être au plus UNE courte phrase (par exemple pour signaler un plat absent du menu) ou vide : le système affiche lui-même le récapitulatif et le total. Ne calcule JAMAIS de total, ne recopie pas le panier.
 - Il faut aussi un nom et un numéro de téléphone. Un seul nom OU prénom suffit. Remplis "nom" et "contact" uniquement avec ce que le client a réellement écrit, n'invente jamais. Ne les redemande jamais s'ils sont déjà dans ÉTAT ACTUEL. Un numéro peut s'écrire avec espaces, points, tirets ou indicatif : accepte-le tel quel.
