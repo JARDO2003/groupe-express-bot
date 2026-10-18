@@ -55,11 +55,25 @@ const DUREE_ETAT_MS = 6 * 60 * 60 * 1000;
 const PAUSE_LONGUE_MS = 30 * 60 * 1000; // au-delà, un "cc" relance l'accueil + menu
 const MAX_LIGNES = 15; // plats différents dans un panier
 const MAX_QTE = 20;    // quantité maximale par ligne
-const SERVICE_CLIENT = "0719480884"; // téléphone du service client (souci, réclamation ou sujet hors commande)
+const SERVICE_CLIENT = "0719480884"; // téléphone du service client (souci, réclamation, demande ou sujet hors commande)
 
 // Redirection vers le service client : le numéro vient de SERVICE_CLIENT, jamais inventé
 function contactService() {
   return `📞 Service client Groupe Express : ${SERVICE_CLIENT} (appelez-nous, on vous répond rapidement)`;
+}
+
+// Réponse quand le client envoie un vocal, une image ou un autre fichier
+function messageSansTexte(type) {
+  const nature = /audio|ptt|voice/i.test(String(type))
+    ? "les messages vocaux"
+    : "les images et fichiers";
+
+  return (
+    `${salutation()} 😊 Je ne peux pas lire ${nature}.\n\n` +
+    `Merci de m'écrire votre message en *texte* (par exemple : « 2 attiéké poisson »).\n\n` +
+    `Pour toute demande ou question, vous pouvez aussi appeler le service client :\n` +
+    contactService()
+  );
 }
 
 // ===============================
@@ -823,7 +837,8 @@ ${menuLignes()}
 - Quand la commande est validée, le client reçoit un code de livraison (GE-XXXX) à présenter à la remise, puis le système lui demande son avis sur Groupe Express.
 - Les commandes sont prises de ${HEURE_REOUVERTURE}h00 à ${HEURE_FERMETURE}h00 (heure d'Abidjan), fermées entre ${HEURE_FERMETURE}h00 et ${HEURE_REOUVERTURE}h00.
 - Les plats se récupèrent sur place : à ${HEURE_RAPPEL_TEXTE}, un message prévient les clients de venir récupérer leurs plats.
-- Service client (téléphone) : ${SERVICE_CLIENT}. C'est LE numéro à donner quand le client a un souci ou parle d'autre chose que commander un repas. Donne-le tel quel, ne le modifie jamais et n'invente aucun autre numéro.
+- Service client (téléphone) : ${SERVICE_CLIENT}. C'est LE numéro à donner quand le client a un souci, une demande, ou parle d'autre chose que commander un repas. Donne-le tel quel, ne le modifie jamais et n'invente aucun autre numéro.
+- Les clients doivent écrire en texte : les vocaux, images et fichiers ne sont pas lus. Si le client dit avoir envoyé un vocal, demande-lui d'écrire son message.
 - Tu ne connais PAS : l'adresse exacte, les horaires d'ouverture, les moyens de paiement, les tarifs de livraison, la composition ou la taille des plats, les promotions, les délais précis, ni les boissons si elles ne sont pas au menu. Ne les invente JAMAIS.
 
 À PROPOS DE GROUPE EXPRESS (tu peux en parler en détail, avec tes propres mots, quand on te le demande) :
@@ -851,6 +866,7 @@ COMPRENDRE LES CLIENTS :
 - Quelques emojis 🍽️📦😊 sans exagérer, style WhatsApp.
 - Si le client est mécontent, reste calme et poli, excuse-toi simplement, propose de transmettre sa remarque et donne-lui le numéro du service client ${SERVICE_CLIENT}.
 - SOUCI : si le client rencontre un problème (plat manquant ou différent, erreur de prix ou de total, commande qui tarde, paiement, annulation ou modification d'une commande déjà validée, réclamation, ou toute demande que tu ne peux pas régler toi-même), excuse-toi simplement, rassure-le, puis invite-le à appeler le service client au ${SERVICE_CLIENT}.
+- DEMANDES : toute demande, question ou requête que tu ne peux pas traiter toi-même (modification ou annulation d'une commande validée, réclamation, information que tu ne connais pas, parler à un responsable) doit être redirigée vers le service client : dis-lui d'appeler le ${SERVICE_CLIENT}. Donne ce numéro tel quel.
 - HORS SUJET : si le client parle d'autre chose que les repas de Groupe Express, réponds brièvement et poliment, puis ramène la conversation vers les repas et donne-lui le numéro du service client ${SERVICE_CLIENT} s'il souhaite parler à une personne.
 
 COMMENT TU GÈRES LE PANIER :
@@ -1296,7 +1312,9 @@ async function traiterMessage(from, texteBrut, meta = {}) {
       const ok = await enregistrerDemande(from, nom, texte, decision.a_transmettre);
 
       if (ok) {
-        const note = `📝 J'ai transmis votre demande à l'équipe.\n${contactService()}`;
+        const note =
+          `📝 Votre demande a bien été notée.\n` +
+          `Pour qu'elle soit traitée rapidement, merci d'appeler directement le service client au *${SERVICE_CLIENT}*.`;
         reponse = typeof reponse === "string" && reponse.trim() ? reponse + "\n\n" + note : note;
       }
     }
@@ -1712,9 +1730,10 @@ async function traiterMessageEntrant(msg) {
         pushName: msg.pushName || msg.name || null
       });
     } else {
+      // Vocal, image ou autre fichier : on demande d'écrire en texte
       await chargerMenu();
       reponse =
-        "Merci de m'écrire en texte 😊 Je ne peux pas encore lire les vocaux, images ou autres fichiers.\n\n" +
+        messageSansTexte(msg.type) + "\n\n" +
         menuBloc();
     }
   } catch (error) {
