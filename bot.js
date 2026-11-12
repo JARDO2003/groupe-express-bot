@@ -35,8 +35,7 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
 const GEMINI_TIMEOUT_MS = 9000;
 const FUSEAU = "Africa/Abidjan";
 const HEURE_RAPPEL_TEXTE = "12h00"; // heure de retrait des plats
-const HEURE_FERMETURE = 11;   // à partir de 11h (heure d'Abidjan), plus de commandes
-const HEURE_REOUVERTURE = 17; // les commandes rouvrent à 17h
+const HEURE_LIMITE = 11; // avant 11h (heure d'Abidjan) : retrait le jour même ; à partir de 11h : retrait le lendemain
 
 function heureAbidjan() {
   return Number(
@@ -44,9 +43,9 @@ function heureAbidjan() {
   ) % 24;
 }
 
-function commandesFermees() {
-  const h = heureAbidjan();
-  return h >= HEURE_FERMETURE && h < HEURE_REOUVERTURE;
+// Les commandes sont prises 24h/24 ; passé la limite, elles sont à récupérer le lendemain
+function apresLimite() {
+  return heureAbidjan() >= HEURE_LIMITE;
 }
 
 const MAX_MESSAGE = 600;
@@ -185,8 +184,39 @@ function menuTexte(nomClient) {
       ? `${salutation()} ${nomClient} 👋\nContent de vous revoir chez Groupe Express 🍽️\n\n`
       : `${salutation()} 👋\nBienvenue chez Groupe Express 🍽️\n\n`) +
     `Voici ce que nous proposons :\n\n` +
-    menuBloc()
+    menuBloc() +
+    `\n\n${avisRetrait()}`
   );
+}
+
+// ===============================
+// DATES ET RETRAIT (avant 11h : aujourd'hui 12h ; à partir de 11h : demain 12h)
+// ===============================
+
+function dateJour() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: FUSEAU }).format(new Date());
+}
+
+// Abidjan est en UTC toute l'année (pas d'heure d'été) : +24h = demain
+function dateDemain() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: FUSEAU }).format(new Date(Date.now() + 24 * 3600 * 1000));
+}
+
+// Jour où la commande passée MAINTENANT sera récupérée
+function dateRetrait() {
+  return apresLimite() ? dateDemain() : dateJour();
+}
+
+// "aujourd'hui à 12h00" ou "demain à 12h00" pour un jour de retrait donné
+function quandRetrait(jourRetrait) {
+  return (jourRetrait && jourRetrait > dateJour() ? "demain" : "aujourd'hui") + ` à ${HEURE_RAPPEL_TEXTE}`;
+}
+
+// Phrase d'information selon l'heure actuelle
+function avisRetrait() {
+  return apresLimite()
+    ? `⏰ Il est passé ${HEURE_LIMITE}h : les commandes passées maintenant sont à récupérer *demain à ${HEURE_RAPPEL_TEXTE}*.`
+    : `📅 Les commandes passées avant ${HEURE_LIMITE}h sont à récupérer *aujourd'hui à ${HEURE_RAPPEL_TEXTE}* (après ${HEURE_LIMITE}h : demain à ${HEURE_RAPPEL_TEXTE}).`;
 }
 
 // ===============================
@@ -199,10 +229,6 @@ function normaliser(texte) {
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .trim();
-}
-
-function dateJour() {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: FUSEAU }).format(new Date());
 }
 
 const MOTS_VIDES_PLAT = [
@@ -489,7 +515,10 @@ function recapTexte(lignes) {
     .map(l => `🍽️ ${ligneTexte(l)} — ${l.plat.des ? "dès " : ""}${prixF(Number(l.plat.prix) * l.qte)}`)
     .join("\n");
 
-  return `Voici votre panier :\n\n${corps}\n\n💰 Total : ${totalTexte(lignes)}`;
+  return (
+    `Voici votre panier :\n\n${corps}\n\n💰 Total : ${totalTexte(lignes)}\n` +
+    `📅 Retrait : ${quandRetrait(dateRetrait())}`
+  );
 }
 
 // Récapitulatif + ce qu'il manque, ou demande de confirmation si tout est là
@@ -522,7 +551,7 @@ function recapEtSuite(lignes, nom, contact) {
 // ===============================
 
 async function lireEtat(from) {
-  const vide = { panier: [], recap: false, nom: null, contact: null, avisAttendu: false, hist: [], maj: 0 };
+  const vide = { panier: [], recap: false, recapRetrait: null, nom: null, contact: null, avisAttendu: false, hist: [], maj: 0 };
 
   const doc = await firestore.collection("conversations").doc(from).get();
 
@@ -535,6 +564,7 @@ async function lireEtat(from) {
   return {
     panier: Array.isArray(d.panier) ? d.panier.map(l => ({ ...l })) : [],
     recap: !!d.recap,
+    recapRetrait: d.recapRetrait || null,
     nom: d.nom || null,
     contact: d.contact || null,
     avisAttendu: !!d.avisAttendu,
@@ -547,6 +577,7 @@ async function ecrireEtat(from, etat) {
   await firestore.collection("conversations").doc(from).set({
     panier: Array.isArray(etat.panier) ? etat.panier : [],
     recap: !!etat.recap,
+    recapRetrait: etat.recap ? (etat.recapRetrait || null) : null,
     nom: etat.nom || null,
     contact: etat.contact || null,
     avisAttendu: !!etat.avisAttendu,
@@ -555,20 +586,37 @@ async function ecrireEtat(from, etat) {
   });
 }
 
+// Commandes du client : passées aujourd'hui OU à récupérer aujourd'hui
+// (une commande passée hier après 11h est à récupérer aujourd'hui ; une commande passée
+// aujourd'hui après 11h est à récupérer demain : les deux doivent rester visibles)
 async function commandesDuJour(from) {
   try {
-    const snapshot = await firestore
-      .collection("commandes")
-      .where("chatId", "==", from)
-      .where("jour", "==", dateJour())
-      .get();
+    const jour = dateJour();
 
+    const [passees, aRetirer] = await Promise.all([
+      firestore.collection("commandes").where("chatId", "==", from).where("jour", "==", jour).get(),
+      firestore.collection("commandes").where("chatId", "==", from).where("jourRetrait", "==", jour).get()
+    ]);
+
+    const vues = new Set();
     const liste = [];
 
-    snapshot.forEach(doc => {
+    const ajouter = doc => {
+      if (vues.has(doc.id)) return;
+      vues.add(doc.id);
       const c = doc.data();
-      liste.push({ code: c.code || doc.id, plat: c.plat, statut: c.statut, nom: c.nom, total: c.total || c.prix || 0 });
-    });
+      liste.push({
+        code: c.code || doc.id,
+        plat: c.plat,
+        statut: c.statut,
+        nom: c.nom,
+        total: c.total || c.prix || 0,
+        jourRetrait: c.jourRetrait || c.jour || jour
+      });
+    };
+
+    passees.forEach(ajouter);
+    aRetirer.forEach(ajouter);
 
     return liste;
   } catch (error) {
@@ -670,6 +718,10 @@ async function enregistrerCommande(chatId, lignes, nom, contact, messageId = nul
   const resume = lignes.map(ligneTexte).join(", ");
   const premier = lignes[0].plat;
 
+  // Fixé une seule fois pour toute la commande (jour de commande et jour de retrait)
+  const jour = dateJour();
+  const jourRetrait = dateRetrait();
+
   for (let essai = 0; essai < 5; essai++) {
     const code = genererCode();
 
@@ -695,13 +747,14 @@ async function enregistrerCommande(chatId, lignes, nom, contact, messageId = nul
         messageId: messageId,
         nom: nom,
         contact: contact,
-        jour: dateJour(),
+        jour: jour,                // jour où la commande a été passée
+        jourRetrait: jourRetrait,  // jour où elle sera récupérée (12h00)
         date: new Date().toISOString(),
         statut: "en_attente",
         ...(express.actif ? { fournisseurEnvoi: "a_envoyer" } : {})
       });
 
-      return code;
+      return { code, jourRetrait };
     } catch (error) {
       if (error.code === 6 || /ALREADY_EXISTS/.test(error.message)) {
         continue;
@@ -802,11 +855,11 @@ const SCHEMA_REPONSE = {
   required: ["reponse"]
 };
 
-function libelleStatut(statut) {
+function libelleStatut(statut, jourRetrait) {
   if (statut === "rappel_envoye") {
     return "prête, le client a été prévenu de venir la récupérer";
   }
-  return `enregistrée, en préparation (message de retrait envoyé à ${HEURE_RAPPEL_TEXTE})`;
+  return `enregistrée, en préparation (à récupérer ${quandRetrait(jourRetrait)} ; un message de retrait est envoyé à ${HEURE_RAPPEL_TEXTE})`;
 }
 
 function construirePrompt(texte, etat, commandes, profil, nomWhatsApp) {
@@ -827,9 +880,13 @@ function construirePrompt(texte, etat, commandes, profil, nomWhatsApp) {
 
   const deja = commandes.length
     ? commandes
-        .map(c => `- ${c.code} : ${c.plat}, total ${prixF(c.total)} (${libelleStatut(c.statut)})`)
+        .map(c => `- ${c.code} : ${c.plat}, total ${prixF(c.total)} (${libelleStatut(c.statut, c.jourRetrait)})`)
         .join("\n")
     : "Aucune commande aujourd'hui.";
+
+  const retraitMaintenant = apresLimite()
+    ? `Il est passé ${HEURE_LIMITE}h : toute commande passée maintenant sera à récupérer DEMAIN à ${HEURE_RAPPEL_TEXTE}.`
+    : `Il est avant ${HEURE_LIMITE}h : toute commande passée maintenant sera à récupérer AUJOURD'HUI à ${HEURE_RAPPEL_TEXTE}.`;
 
   return `
 Tu es l'assistant WhatsApp de Groupe Express, un service de vente de repas à emporter (retrait sur place) en Côte d'Ivoire.
@@ -842,12 +899,12 @@ ${menuLignes()}
 - Les lettres servent UNIQUEMENT à remplir les champs "plat". Ne les écris jamais au client : parle toujours des plats par leur nom. Le menu est montré au client en liste à puces, sans numéros : il écrit librement ce qu'il veut avec ses propres mots ; retrouve chaque plat par son nom (même mal écrit).
 - Le client peut commander plusieurs plats avec des quantités dans un seul message, en écrivant librement. Il donne aussi son nom et son numéro de téléphone (un seul nom suffit).
 - Quand la commande est validée, le client reçoit un code de livraison (GE-XXXX) à présenter à la remise, puis le système lui demande son avis sur Groupe Express.
-- Les commandes sont prises de ${HEURE_REOUVERTURE}h00 à ${HEURE_FERMETURE}h00 (heure d'Abidjan), fermées entre ${HEURE_FERMETURE}h00 et ${HEURE_REOUVERTURE}h00.
-- Les plats se récupèrent sur place : à ${HEURE_RAPPEL_TEXTE}, un message prévient les clients de venir récupérer leurs plats.
+- Les commandes sont prises à toute heure. Règle de retrait : une commande passée AVANT ${HEURE_LIMITE}h00 (heure d'Abidjan) est à récupérer le JOUR MÊME à ${HEURE_RAPPEL_TEXTE} ; une commande passée à partir de ${HEURE_LIMITE}h00 est à récupérer LE LENDEMAIN à ${HEURE_RAPPEL_TEXTE}. ${retraitMaintenant} Ne dis jamais que les commandes sont fermées.
+- Les plats se récupèrent sur place : à ${HEURE_RAPPEL_TEXTE} le jour du retrait, un message prévient les clients de venir récupérer leurs plats.
 - Service client (téléphone) : ${SERVICES_TXT}. Ce sont LES numéros à donner quand le client a un souci, une demande, ou parle d'autre chose que commander un repas. Donne-les tels quels, ne les modifie jamais et n'invente aucun autre numéro.
 - Paiement : uniquement en espèces, au stand Groupe Express, à la livraison de la commande.
 - Les clients doivent écrire en texte : les vocaux, images et fichiers ne sont pas lus. Si le client dit avoir envoyé un vocal, demande-lui d'écrire son message.
-- Tu ne connais PAS : l'adresse exacte, les horaires d'ouverture, les tarifs de livraison, la composition ou la taille des plats, les promotions, les délais précis, ni les boissons si elles ne sont pas au menu. Ne les invente JAMAIS.
+- Tu ne connais PAS : l'adresse exacte, les horaires d'ouverture du stand, les tarifs de livraison, la composition ou la taille des plats, les promotions, les délais précis, ni les boissons si elles ne sont pas au menu. Ne les invente JAMAIS.
 
 À PROPOS DE GROUPE EXPRESS (tu peux en parler en détail, avec tes propres mots, quand on te le demande) :
 GROUPE EXPRESS est une entreprise dynamique spécialisée dans la distribution de repas universitaires. Sa mission : fournir aux étudiants et au personnel académique des repas de qualité, savoureux et équilibrés, à des prix très accessibles. Fondée avec la vision de lutter contre la malnutrition et d'améliorer les conditions de vie des étudiants dans les universités, elle propose une large gamme de plats traditionnels et modernes adaptés aux goûts et aux besoins des jeunes. Présente dans plusieurs établissements universitaires, elle se distingue par :
@@ -884,14 +941,14 @@ COMMENT TU GÈRES LE PANIER :
 - Pour retirer ou diminuer : "articles_retirer" avec "plat" et "quantite" (null = retirer tout ce plat). Pour remplacer un plat par un autre : retire l'ancien ET ajoute le nouveau.
 - Une seule commande peut contenir PLUSIEURS plats différents. Un client peut commander 2, 4, 6 plats ou plus dans un seul message ou en plusieurs messages : remplis une entrée par plat dans "articles_ajouter", ils vont tous dans le même panier. Tu ne fais que transmettre les plats et quantités : le système calcule la facture et enregistre la commande.
 - Si le client demande seulement une info sur un plat, ne touche pas au panier.
-- Quand tu modifies le panier, "reponse" doit être au plus UNE courte phrase (par exemple pour signaler un plat absent du menu) ou vide : le système affiche lui-même le récapitulatif et le total. Ne calcule JAMAIS de total, ne recopie pas le panier.
+- Quand tu modifies le panier, "reponse" doit être au plus UNE courte phrase (par exemple pour signaler un plat absent du menu) ou vide : le système affiche lui-même le récapitulatif, le total et le jour de retrait. Ne calcule JAMAIS de total, ne recopie pas le panier.
 - Il faut aussi un nom et un numéro de téléphone. Un seul nom OU prénom suffit. Remplis "nom" et "contact" uniquement avec ce que le client a réellement écrit, n'invente jamais. Ne les redemande jamais s'ils sont déjà dans ÉTAT ACTUEL. Un numéro de Côte d'Ivoire a 10 chiffres (ex. 0172369740), parfois écrit avec espaces, points, tirets ou +225. S'il n'a pas 10 chiffres, laisse contact vide et redemande poliment un numéro à 10 chiffres.
 - Si le client donne le nom et le numéro d'un coup (ex : "madani 0567890612"), prends les deux. Si le client donne plat, quantités, nom et numéro dans un même message, remplis tout d'un coup.
 - Si le client hésite ou demande conseil, recommande 1 ou 2 plats du menu avec leur prix.
 - Ne dis JAMAIS que la commande est enregistrée ou validée et n'invente JAMAIS de code : le système le fait seulement après la confirmation du client. Mets "confirmer" à true uniquement si le client confirme clairement le récapitulatif déjà montré, sans rien modifier dans ce même message.
 - Si le client veut annuler ou recommencer sa saisie en cours, mets "annuler" à true.
 - Les commandes déjà validées (liste ci-dessous) sont distinctes du panier : si le client veut commander "encore" quelque chose après une commande validée, c'est une NOUVELLE commande avec son propre code. Si ce n'est pas clair, demande-lui simplement s'il veut une nouvelle commande.
-- Si le client demande où en est sa commande ou son code, appuie-toi uniquement sur la liste "Commandes du client aujourd'hui" ci-dessous. Tu ne parles que des commandes de CE client.
+- Si le client demande où en est sa commande ou son code, appuie-toi uniquement sur la liste "Commandes du client" ci-dessous, en précisant quand elle sera à récupérer (aujourd'hui ou demain à ${HEURE_RAPPEL_TEXTE}). Tu ne parles que des commandes de CE client.
 - Si le client demande une chose que tu ne sais pas, ou veut modifier/annuler une commande déjà validée, ou fait une réclamation, ou veut parler à un responsable : explique simplement que tu n'as pas l'information, et mets dans "a_transmettre" un résumé court de sa demande. Le système préviendra l'équipe : ne le dis pas toi-même. Dans "reponse", invite-le toujours à appeler le service client au ${SERVICES_TXT}.
 - Si tu dois montrer le menu (premier message, demande de menu/plats/prix), mets "montrer_menu" à true et fais seulement une courte phrase d'accueil : le système ajoute la liste lui-même, ne la recopie pas.
 - Si le client demande qui a conçu/créé/développé ce programme ou ce chatbot : mets "image" à "createur" et dans "reponse" présente ZINZINDOHOUE MARCIO JARDEL (le texte sera envoyé avec sa photo).
@@ -905,7 +962,7 @@ ${profil ? `CLIENT DÉJÀ CONNU : ${profil.nom}, ${profil.contact}. Ces informat
 ${panierTxt}
 ${etat.avisAttendu ? "Le système vient de demander au client son avis sur Groupe Express. S'il répond par un avis, même court (\"très bon\", \"bof\", \"c'était bien\"), mets-le dans avis et remercie-le chaleureusement." : ""}
 
-Commandes du client aujourd'hui :
+Commandes du client (passées aujourd'hui ou à récupérer aujourd'hui) :
 ${deja}
 
 Conversation récente :
@@ -1055,11 +1112,13 @@ function reponseSuspecte(texte, commandes) {
   return false;
 }
 
-// État des commandes du jour, construit uniquement à partir de la base
+// État des commandes, construit uniquement à partir de la base
 function statutCommandes(commandes) {
   return (
-    "Voici vos commandes d'aujourd'hui 📦\n\n" +
-    commandes.map(c => `🔑 ${c.code} : ${c.plat} (${prixF(c.total)}) — ${libelleStatut(c.statut)}`).join("\n")
+    "Voici vos commandes 📦\n\n" +
+    commandes
+      .map(c => `🔑 ${c.code} : ${c.plat} (${prixF(c.total)}) — ${libelleStatut(c.statut, c.jourRetrait)}`)
+      .join("\n")
   );
 }
 
@@ -1118,18 +1177,8 @@ async function traiterMessage(from, texteBrut, meta = {}) {
     return oubli;
   }
 
-  // Commandes fermées de 11h à 17h (heure d'Abidjan)
-  if (commandesFermees()) {
-    const ferme =
-      `${salutation()} 👋 Les commandes sont fermées pour le moment ⏰\n` +
-      `• Les commandes s'arrêtent à ${HEURE_FERMETURE}h00\n` +
-      `• Elles rouvrent à ${HEURE_REOUVERTURE}h00 (heure d'Abidjan)\n` +
-      `• Retrait des plats : ${HEURE_RAPPEL_TEXTE}\n\n` +
-      `Revenez à partir de ${HEURE_REOUVERTURE}h00 pour commander 😊\n\n` + contactService();
-    etat.hist.push({ r: "c", t: texte }, { r: "b", t: "Commandes fermées" });
-    await ecrireEtat(from, { panier: [], recap: false, nom: etat.nom, contact: etat.contact, avisAttendu: etat.avisAttendu, hist: etat.hist });
-    return ferme;
-  }
+  // Plus de fermeture : les commandes sont prises 24h/24.
+  // Avant 11h -> retrait aujourd'hui à 12h ; à partir de 11h -> retrait demain à 12h.
 
   if (profil) {
     etat.nom = etat.nom || profil.nom;
@@ -1185,6 +1234,7 @@ async function traiterMessage(from, texteBrut, meta = {}) {
   let contact = etat.contact;
   let avisAttendu = etat.avisAttendu;
   let recap = etat.recap;
+  let recapRetrait = etat.recapRetrait;
   let reponse;
 
   if (decision.annuler === true) {
@@ -1225,8 +1275,12 @@ async function traiterMessage(from, texteBrut, meta = {}) {
   const lignes = detaillerPanier(panier);
   panier = lignes.map(l => ({ platId: l.plat.id, qte: l.qte, precision: l.precision }));
 
+  // Le jour de retrait a changé depuis le récapitulatif (ex. il était 10h58, il est 11h02) :
+  // le client doit revoir le récapitulatif avec la nouvelle date avant de confirmer
+  const retraitChange = Boolean(etat.recap && etat.recapRetrait && etat.recapRetrait !== dateRetrait());
+
   // Le récapitulatif montré n'est plus valable si quelque chose a changé
-  const modif = modifPanier || nomChange || telChange;
+  const modif = modifPanier || nomChange || telChange || retraitChange;
   if (modif) recap = false;
 
   let commandeValidee = false;
@@ -1234,12 +1288,14 @@ async function traiterMessage(from, texteBrut, meta = {}) {
 
   if (decision.confirmer === true && etat.recap && !modif && lignes.length && nom && contact) {
     // 3) Confirmation : enregistrement réel, puis code
-    const code = await enregistrerCommande(from, lignes, nom, contact, meta.id || null);
+    const { code, jourRetrait } = await enregistrerCommande(from, lignes, nom, contact, meta.id || null);
 
     const utiliseProfil = !!profil && nom === profil.nom && contact === profil.contact && !nomChange && !telChange;
     const demanderAvis = !profil || ((profil.commandes || 0) + 1) % 5 === 0;
 
     await sauverProfil(from, nom, contact, true);
+
+    const demain = jourRetrait > dateJour();
 
     reponse = [
       `✅ Commande validée !\n\n` +
@@ -1247,12 +1303,15 @@ async function traiterMessage(from, texteBrut, meta = {}) {
         lignes.map(l => `🍽️ ${ligneTexte(l)}`).join("\n") + "\n" +
         `💰 Total : ${totalTexte(lignes)}\n` +
         `👤 ${nom}\n` +
-        `📞 ${contact}\n\n` +
+        `📞 ${contact}\n` +
+        `📅 Retrait : ${quandRetrait(jourRetrait)}\n\n` +
         (utiliseProfil
           ? `ℹ️ J'ai repris vos informations déjà enregistrées. Si elles ont changé, envoyez-moi simplement le nouveau nom ou numéro.\n\n`
           : "") +
         `Gardez bien ce code : il vous sera demandé à la livraison de votre commande 📦\n` +
-        `Nous vous écrirons à ${HEURE_RAPPEL_TEXTE} dès que votre repas est prêt.`,
+        (demain
+          ? `Votre commande a été prise après ${HEURE_LIMITE}h : elle sera prête *demain à ${HEURE_RAPPEL_TEXTE}*. Nous vous écrirons demain dès que votre repas est prêt.`
+          : `Nous vous écrirons à ${HEURE_RAPPEL_TEXTE} dès que votre repas est prêt.`),
       `Merci pour votre confiance ${nom} 😊\n\n` +
         `Pour finir, que pensez-vous de Groupe Express ? ` +
         `Dites-nous en quelques mots votre avis sur nos plats et notre service 💬`
@@ -1267,6 +1326,7 @@ async function traiterMessage(from, texteBrut, meta = {}) {
     commandeValidee = true;
     panier = [];
     recap = false;
+    recapRetrait = null;
     nom = null;
     contact = null;
   } else {
@@ -1274,6 +1334,9 @@ async function traiterMessage(from, texteBrut, meta = {}) {
       decision.reponse && String(decision.reponse).trim()
         ? String(decision.reponse).trim()
         : null;
+
+    // Si seul le jour de retrait a changé, on ignore la réponse de l'IA (« parfait ! ») et on remontre le récapitulatif
+    if (retraitChange && !modifPanier && !nomChange && !telChange) dite = null;
 
     let ecartee = false;
 
@@ -1285,11 +1348,15 @@ async function traiterMessage(from, texteBrut, meta = {}) {
 
     if (lignes.length) {
       if (modif || !dite) {
-        // Le code construit le récapitulatif (prix et total fiables)
+        // Le code construit le récapitulatif (prix, total et jour de retrait fiables)
         const suite = recapEtSuite(lignes, nom, contact);
-        const prefixe = modif && dite && dite.length <= 200 ? dite + "\n\n" : "";
+        let prefixe = modif && dite && dite.length <= 200 ? dite + "\n\n" : "";
+        if (retraitChange) {
+          prefixe += `⏰ Il est maintenant passé ${HEURE_LIMITE}h : votre commande sera à récupérer *demain à ${HEURE_RAPPEL_TEXTE}*.\n\n`;
+        }
         reponse = prefixe + suite.texte;
         recap = suite.complet;
+        recapRetrait = suite.complet ? dateRetrait() : null;
       } else {
         reponse = dite;
       }
@@ -1345,35 +1412,49 @@ async function traiterMessage(from, texteBrut, meta = {}) {
     .join("\n\n");
 
   etat.hist.push({ r: "c", t: texte }, { r: "b", t: texteReponse.slice(0, 300) });
-  await ecrireEtat(from, { panier, recap, nom, contact, avisAttendu, hist: etat.hist });
+  await ecrireEtat(from, { panier, recap, recapRetrait, nom, contact, avisAttendu, hist: etat.hist });
 
   return reponse;
 }
 
 // ===============================
 // RAPPEL (appelé par index.js à 11h59)
+// Ne concerne que les commandes dont le jour de retrait est AUJOURD'HUI.
+// Les commandes passées après 11h (jourRetrait = demain) sont rappelées demain.
 // ===============================
 
 async function envoyerRappels() {
-  const snapshot = await firestore
-    .collection("commandes")
-    .where("jour", "==", dateJour())
-    .where("statut", "==", "en_attente")
-    .get();
+  const jour = dateJour();
 
-  if (snapshot.empty) return { clients: 0, envoyes: 0 };
+  const [parRetrait, parJour] = await Promise.all([
+    firestore.collection("commandes").where("jourRetrait", "==", jour).where("statut", "==", "en_attente").get(),
+    // Anciennes commandes (sans jourRetrait) : retrait le jour même
+    firestore.collection("commandes").where("jour", "==", jour).where("statut", "==", "en_attente").get()
+  ]);
 
   const parClient = new Map();
+  const vues = new Set();
 
-  snapshot.forEach(doc => {
+  const ajouter = doc => {
+    if (vues.has(doc.id)) return;
     const commande = doc.data();
+
+    // Passée aujourd'hui mais à récupérer demain : on n'y touche pas
+    if (commande.jourRetrait && commande.jourRetrait !== jour) return;
+
+    vues.add(doc.id);
 
     if (!parClient.has(commande.chatId)) {
       parClient.set(commande.chatId, []);
     }
 
     parClient.get(commande.chatId).push({ id: doc.id, ...commande });
-  });
+  };
+
+  parRetrait.forEach(ajouter);
+  parJour.forEach(ajouter);
+
+  if (!parClient.size) return { clients: 0, envoyes: 0 };
 
   const resultats = await Promise.allSettled(
     [...parClient.entries()].map(async ([chatId, commandes]) => {
@@ -1522,6 +1603,12 @@ function messageFournisseur(c, f, cfg, items) {
     .map(a => `🍽️ ${a.qte || 1} × ${a.nom}${a.precision ? ` (${a.precision})` : ""} - ${prixF((a.prix || 0) * (a.qte || 1))}`)
     .join("\n");
 
+  // Le fournisseur doit savoir pour quel jour préparer
+  const pourDemain = c.jourRetrait && c.jour && c.jourRetrait > c.jour;
+  const retrait = pourDemain
+    ? `📅 *À PRÉPARER POUR DEMAIN* (${c.jourRetrait}) - retrait à ${HEURE_RAPPEL_TEXTE}\n`
+    : `📅 À préparer pour aujourd'hui - retrait à ${HEURE_RAPPEL_TEXTE}\n`;
+
   return (
     `Bonjour ${f.nom} 👋\n\n` +
     `🛒 *Nouvelle commande Groupe Express*\n\n` +
@@ -1529,8 +1616,9 @@ function messageFournisseur(c, f, cfg, items) {
     `${detail}\n` +
     `👤 Client : ${c.nom}\n` +
     (cfg.inclureContact && c.contact ? `📞 ${c.contact}\n` : "") +
-    `🕐 ${heure}\n\n` +
-    `Merci de préparer cette commande 🙏`
+    `🕐 Commandé à ${heure}\n` +
+    retrait +
+    `\nMerci de préparer cette commande 🙏`
   );
 }
 
