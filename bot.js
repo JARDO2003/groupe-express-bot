@@ -78,7 +78,7 @@ function messageSansTexte(type) {
 
   return (
     `${salutation()} 😊 Je ne peux pas lire ${nature}.\n\n` +
-    `Merci de m'écrire votre message en *texte* (par exemple : « 2 attiéké poisson »).\n\n` +
+    `Merci de m'écrire votre message en *texte* (par exemple : « 2 attiéké poisson » ou simplement le *numéro* du plat).\n\n` +
     `Pour toute demande ou question, vous pouvez aussi appeler le service client :\n` +
     contactService()
   );
@@ -88,7 +88,7 @@ function messageSansTexte(type) {
 // MENU (collection Firestore "plats", géré uniquement depuis la page admin)
 // ===============================
 
-let PLATS = []; // plats actifs de la requête en cours
+let PLATS = []; // plats actifs de la requête en cours (chacun avec son numéro 1, 2, 3...)
 
 function trierPlats(liste) {
   const minCat = {};
@@ -108,20 +108,12 @@ async function tousLesPlats() {
   return trierPlats(liste);
 }
 
+// Chaque plat actif reçoit un numéro continu (1, 2, 3...) montré au client.
+// "lettre" est conservé (sous forme de texte du numéro) pour rester compatible avec la page admin.
 async function chargerMenu() {
   const actifs = (await tousLesPlats()).filter(p => p.actif !== false);
-  PLATS = actifs.map((p, i) => ({ ...p, lettre: etiquette(i) }));
+  PLATS = actifs.map((p, i) => ({ ...p, numero: i + 1, lettre: String(i + 1) }));
   return PLATS;
-}
-
-function etiquette(i) {
-  let n = i;
-  let out = "";
-  do {
-    out = String.fromCharCode(65 + (n % 26)) + out;
-    n = Math.floor(n / 26) - 1;
-  } while (n >= 0);
-  return out;
 }
 
 function prixF(n) {
@@ -132,33 +124,33 @@ function prixTexte(p) {
   return (p.des ? "Dès " : "") + prixF(p.prix);
 }
 
-// Menu pour l'IA : lettre interne (jamais montrée au client)
+// Menu pour l'IA : numéro ➜ prix - plat
 function menuLignes() {
   let cat = null;
   let out = "";
 
-  PLATS.forEach((p, i) => {
+  PLATS.forEach(p => {
     if (p.categorie !== cat) {
       cat = p.categorie;
       out += `\n*${cat}*\n`;
     }
-    out += `*${p.lettre}* ➜ ${prixTexte(p)} - ${p.nom}\n`;
+    out += `*${p.numero}* ➜ ${prixTexte(p)} - ${p.nom}\n`;
   });
 
   return out.trim();
 }
 
-// Menu montré aux clients : liste à puces, le client écrit librement ce qu'il veut
+// Menu montré aux clients : liste numérotée, le client peut écrire le numéro ou le nom
 function menuLignesClient() {
   let cat = null;
   let out = "";
 
-  PLATS.forEach((p, i) => {
+  PLATS.forEach(p => {
     if (p.categorie !== cat) {
       cat = p.categorie;
       out += `\n*${cat}*\n`;
     }
-    out += `• ${p.nom} : ${prixTexte(p)}\n`;
+    out += `${p.numero}. ${p.nom} : ${prixTexte(p)}\n`;
   });
 
   return out.trim();
@@ -169,7 +161,10 @@ function menuBloc() {
 
   return (
     `${menuLignesClient()}\n\n` +
-    `Écrivez-moi tout simplement ce que vous voulez, vous pouvez prendre plusieurs plats en un seul message 😊`
+    `👉 Pour commander, écrivez simplement le *numéro* du plat (ex : *3*).\n` +
+    `• Plusieurs plats : *2 et 5*\n` +
+    `• Plusieurs portions : *3 x2* (2 fois le plat n°3)\n` +
+    `Vous pouvez aussi écrire le nom du plat 😊`
   );
 }
 
@@ -331,15 +326,63 @@ function trouverPlat(texte) {
   return null;
 }
 
-// Retrouve un plat à partir de ce que renvoie l'IA : lettre ("B") ou, à défaut, nom
+// Retrouve un plat à partir de ce que renvoie l'IA : numéro ("5") ou, à défaut, nom
 function platDepuisRef(ref) {
   const r = String(ref || "").trim();
   if (!r) return null;
-  return PLATS.find(p => p.lettre === r.toUpperCase()) || trouverPlat(r);
+
+  const num = r.replace(/^(n°|n\s?°|no|num|numero)\s*/i, "").replace(/[.\s]+$/, "");
+  if (/^\d{1,3}$/.test(num)) {
+    const p = PLATS.find(x => x.numero === Number(num));
+    if (p) return p;
+  }
+
+  return trouverPlat(r);
 }
 
 // ===============================
-// RECHERCHE DE PLATS LIÉS ("porc", "porc sauter", "il y a porc ?")
+// COMMANDE PAR NUMÉROS ("3", "2 et 5", "3 x2", "je veux le 4", "n°7")
+// ===============================
+
+// Retourne une liste [{ numero, quantite }] si le message ne contient que des numéros de plats
+// (avec éventuellement "x quantité"), sinon null. Un numéro de téléphone n'est jamais pris pour un numéro de plat.
+function lireNumeros(texte) {
+  let t = normaliser(texte);
+
+  if (!t || /\d{4,}/.test(t)) return null; // numéro de téléphone ou nombre trop long
+
+  t = t
+    .replace(/n\s?°/g, " ")
+    .replace(/\b(numeros?|num|no)\b/g, " ")
+    .replace(/\b(je veux|je voudrais|je prends?|donne(z)? moi|donne|mets?|ajoute|ajouter|prendre|moi|le|la|les|plats?|et|svp|stp|merci|aussi|encore)\b/g, " ")
+    .replace(/[,;+&.]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!t || !/\d/.test(t) || !/^[\d\sx*×]+$/.test(t)) return null;
+
+  const re = /(\d{1,3})(?:\s*[x*×]\s*(\d{1,2}))?/g;
+  const resultats = [];
+  let m;
+
+  while ((m = re.exec(t)) !== null) {
+    resultats.push({
+      numero: Number(m[1]),
+      quantite: Math.max(1, Number(m[2] || 1))
+    });
+  }
+
+  if (!resultats.length) return null;
+
+  // Il ne doit rester que des séparateurs (un "x" isolé rend le message ambigu)
+  const reste = t.replace(re, "").replace(/\s+/g, "");
+  if (reste) return null;
+
+  return resultats.slice(0, MAX_LIGNES);
+}
+
+// ===============================
+// RECHERCHE DE PLATS LIÉS ("porc", "porc sauter", "je veux porc", "il y a porc ?")
 // ===============================
 
 const MOTS_VIDES_RECHERCHE = [
@@ -347,7 +390,8 @@ const MOTS_VIDES_RECHERCHE = [
   "quel", "quelle", "quels", "quelles", "cest", "qu", "en", "pour", "sur", "vend", "vendez",
   "avoir", "reste", "dispo", "disponible", "disponibles", "plat", "plats", "menu", "prix",
   "cmb", "combien", "cherche", "voir", "donne", "donnez", "mon", "ma", "mes", "on", "si",
-  "ou", "pas", "ne", "bonjour", "bonsoir", "salut", "bjr", "bsr", "slt", "merci"
+  "ou", "pas", "ne", "bonjour", "bonsoir", "salut", "bjr", "bsr", "slt", "merci",
+  "veux", "veut", "voudrais", "voudrait", "prends", "prend", "prendre", "souhaite", "aimerais", "aimerai", "jveux"
 ];
 
 function motsRecherche(texte) {
@@ -385,8 +429,15 @@ function platsLies(texte) {
   return retenus.sort((a, b) => a.idx - b.idx).map(x => x.p);
 }
 
+// Sujet de la recherche : uniquement les mots utiles ("je veux porc sauter" -> "porc sauter")
+function sujetRecherche(requete) {
+  const mots = motsRecherche(requete);
+  const sujet = mots.length ? mots.join(" ") : String(requete || "").trim();
+  return sujet.slice(0, 40);
+}
+
 function reponseSuggestions(requete, trouves) {
-  const sujet = String(requete || "").trim().slice(0, 40);
+  const sujet = sujetRecherche(requete);
   let cat = null;
   let corps = "";
 
@@ -395,23 +446,21 @@ function reponseSuggestions(requete, trouves) {
       cat = p.categorie;
       corps += `\n*${cat}*\n`;
     }
-    corps += `• ${p.nom} : ${prixTexte(p)}\n`;
+    corps += `${p.numero}. ${p.nom} : ${prixTexte(p)}\n`;
   });
 
   const intro = trouves.length === 1
-    ? `Oui 😊 Voici ce que nous avons pour « ${sujet} » :`
-    : `Oui 😊 Voici nos plats qui correspondent à « ${sujet} » :`;
+    ? `Voici le plat concernant « ${sujet} » 😊`
+    : `Voici nos plats concernant « ${sujet} » 😊`;
 
   return (
     `${intro}\n${corps.trimEnd()}\n\n` +
-    `Dites-moi lequel vous voulez (avec la quantité) et je le note tout de suite 🍽️`
+    `Dites-moi le *numéro* du plat que vous voulez (ex : *${trouves[0].numero}*, ou *${trouves[0].numero} x2* pour 2 portions) et je le note tout de suite 🍽️`
   );
 }
 
-// Envoie la liste des plats trouvés sans toucher au panier
-async function repondreSuggestions(from, etat, texte, requete, trouves) {
-  const reponse = reponseSuggestions(requete, trouves);
-
+// Envoie une réponse simple sans toucher au panier, en gardant l'état de la conversation
+async function repondreSimple(from, etat, texte, reponse) {
   etat.hist.push({ r: "c", t: texte }, { r: "b", t: reponse.slice(0, 300) });
   await ecrireEtat(from, {
     panier: etat.panier,
@@ -424,6 +473,11 @@ async function repondreSuggestions(from, etat, texte, requete, trouves) {
   });
 
   return reponse;
+}
+
+// Envoie la liste des plats trouvés sans toucher au panier
+async function repondreSuggestions(from, etat, texte, requete, trouves) {
+  return repondreSimple(from, etat, texte, reponseSuggestions(requete, trouves));
 }
 
 // Numéro ivoirien : 10 chiffres (ex. 0172369740), avec ou sans +225 / 00225, espaces, points ou tirets
@@ -985,10 +1039,10 @@ Tu discutes comme un vrai vendeur sympathique : naturel, chaleureux, serviable, 
 Tu écris comme une personne de l'équipe qui répond sur WhatsApp : messages courts et naturels, comme dans une conversation entre deux personnes, sans formules toutes faites et sans te présenter toi-même comme un robot, une IA ou un assistant virtuel. Tu peux dire « l'équipe Groupe Express ». En revanche, si le client te demande sincèrement s'il parle à une personne ou à un robot, ne le nie JAMAIS : réponds simplement et honnêtement que tu es l'assistant virtuel de Groupe Express, puis propose de continuer à l'aider ou de transmettre sa demande à l'équipe.
 
 CE QUE TU SAIS (et rien de plus) :
-- Menu (lettre ➜ prix - plat) :
+- Menu (numéro ➜ prix - plat) :
 ${menuLignes()}
-- Les lettres servent UNIQUEMENT à remplir les champs "plat". Ne les écris jamais au client : parle toujours des plats par leur nom. Le menu est montré au client en liste à puces, sans numéros : il écrit librement ce qu'il veut avec ses propres mots ; retrouve chaque plat par son nom (même mal écrit).
-- Le client peut commander plusieurs plats avec des quantités dans un seul message, en écrivant librement. Il donne aussi son nom et son numéro de téléphone (un seul nom suffit).
+- Le menu est montré au client en liste NUMÉROTÉE : il peut commander en écrivant le numéro du plat (ex : "3", "2 et 5", "3 x2" = 2 fois le plat n°3) ou en écrivant le nom du plat avec ses propres mots (même mal écrit). Dans les champs "plat", mets toujours le NUMÉRO du plat (en texte, ex : "3"). Tu peux citer les numéros au client quand c'est utile, avec le nom du plat.
+- Le client peut commander plusieurs plats avec des quantités dans un seul message. Il donne aussi son nom et son numéro de téléphone (un seul nom suffit).
 - Quand la commande est validée, le client reçoit un code de livraison (GE-XXXX) à présenter à la remise, puis le système lui demande son avis sur Groupe Express.
 - Les commandes sont prises à toute heure. Règle de retrait : une commande passée AVANT ${HEURE_LIMITE}h00 (heure d'Abidjan) est à récupérer le JOUR MÊME à ${HEURE_RAPPEL_TEXTE} ; une commande passée à partir de ${HEURE_LIMITE}h00 est à récupérer LE LENDEMAIN à ${HEURE_RAPPEL_TEXTE}. ${retraitMaintenant} Ne dis jamais que les commandes sont fermées.
 - Les plats se récupèrent sur place : à ${HEURE_RAPPEL_TEXTE} le jour du retrait, un message prévient les clients de venir récupérer leurs plats.
@@ -1015,7 +1069,8 @@ COMPRENDRE LES CLIENTS :
 - Si tu ne comprends vraiment pas la demande, ou si tu ne peux pas y répondre, ne dis JAMAIS que tu es perdu ou que tu ne comprends pas : invite simplement le client à contacter le service client au ${SERVICES_TXT}.
 - Tu réponds uniquement au message que le client vient d'envoyer. Tu n'écris jamais de ton initiative et tu ne promets jamais d'écrire plus tard, sauf le message de retrait envoyé par le système à ${HEURE_RAPPEL_TEXTE}.
 - Reconnais les plats malgré les fautes (attiéké/atieke, tchèpe/tchep, spag/spaghetti, garba...).
-- Le client n'écrit presque jamais le nom exact du menu : il raccourcit, tronque les mots, ne garde que le début ou les initiales (ex : "sau gra" = Sauce graine, "atk poisson" = Attiéké poisson, "poul brais" = poulet braisé). Cherche toujours le plat du menu qui correspond le mieux, même si le nom est incomplet ou déformé, et mets sa lettre dans "plat". Ne demande JAMAIS au client d'écrire le nom exact. Si UN SEUL plat est plausible, prends-le directement. Si DEUX plats ou plus sont plausibles (ex : "sauce" alors qu'il y a plusieurs sauces), pose UNE question courte en citant ces plats par leur nom, sans modifier le panier.
+- NUMÉROS : un numéro précédé de "le", "du", "n°" ou "numéro" (ex : "le 5", "2 du 5", "n°3") désigne le plat portant ce numéro dans le menu ci-dessus ("2 du 5" = 2 portions du plat n°5). Un nombre suivi d'un NOM de plat (ex : "2 garba") est une quantité. Un message composé uniquement de numéros est normalement géré par le système ; s'il t'arrive quand même, un numéro seul = le plat portant ce numéro (quantité 1), et "N x Q" = plat N en quantité Q. Si un numéro ne correspond à aucun plat du menu, dis-le gentiment et propose le menu. Si c'est vraiment ambigu, pose UNE question courte.
+- Le client n'écrit presque jamais le nom exact du menu : il raccourcit, tronque les mots, ne garde que le début ou les initiales (ex : "sau gra" = Sauce graine, "atk poisson" = Attiéké poisson, "poul brais" = poulet braisé). Cherche toujours le plat du menu qui correspond le mieux, même si le nom est incomplet ou déformé, et mets son numéro dans "plat". Ne demande JAMAIS au client d'écrire le nom exact. Si UN SEUL plat est plausible, prends-le directement. Si DEUX plats ou plus sont plausibles (ex : "sauce" alors qu'il y a plusieurs sauces), pose UNE question courte en citant ces plats par leur numéro et leur nom, sans modifier le panier.
 - Si le client donne son avis, un compliment ou une critique sur les plats ou le service, copie-le fidèlement (court) dans "avis" et remercie-le chaleureusement. Ne mets dans "avis" que de vrais avis, jamais une question ni une commande.
 - Si le client parle d'un plat qui n'est pas au menu ET qu'aucun plat du menu ne lui ressemble, dis-le gentiment (dans "reponse") et propose le menu. Ne prétends pas qu'il existe.
 - Réponds dans la langue du client (français par défaut), avec des mots simples. Vouvoie par défaut, tutoie si le client tutoie.
@@ -1028,18 +1083,18 @@ COMPRENDRE LES CLIENTS :
 - HORS SUJET : si le client parle d'autre chose que les repas de Groupe Express, réponds brièvement et poliment, puis ramène la conversation vers les repas et donne-lui le numéro du service client ${SERVICES_TXT} s'il souhaite parler à une personne.
 
 RECHERCHE DE PLATS (très important) :
-- Si le client demande un type de plat, un ingrédient ou un plat qui n'est pas exactement au menu mais qui y ressemble (ex : "porc", "poisson", "il y a porc ?", "porc sauter", "porc au four", "vous avez du poulet ?", "pâtes"), mets le mot-clé principal dans "recherche" (ex : "porc"), laisse "reponse" vide et ne touche pas au panier. Le système affiche lui-même tous les plats du menu qui correspondent.
+- Si le client demande un type de plat, un ingrédient ou un plat qui n'est pas exactement au menu mais qui y ressemble (ex : "porc", "je veux porc", "poisson", "il y a porc ?", "porc sauter", "porc au four", "vous avez du poulet ?", "pâtes"), mets UNIQUEMENT le ou les mots-clés du plat dans "recherche" (ex : "porc", "porc sauter" ; jamais "je veux porc", sans verbe ni formule de politesse), laisse "reponse" vide et ne touche pas au panier. Le système affiche lui-même tous les plats du menu qui correspondent, avec leurs numéros.
 - Ne redirige JAMAIS vers le service client pour ce genre de demande, et ne dis pas qu'un plat n'existe pas avant que le système ait présenté ce qui y ressemble.
 
 COMMENT TU GÈRES LE PANIER :
-- Le panier actuel est affiché dans ÉTAT ACTUEL. Dans "articles_ajouter", mets UNIQUEMENT les plats nouveaux demandés dans CE message : une entrée par plat avec "plat" (la lettre), "quantite" (entier, 1 si non précisé) et "precision" (ex : "sans piment", sinon null). Ne répète jamais des plats déjà dans le panier.
-- Pour retirer ou diminuer : "articles_retirer" avec "plat" et "quantite" (null = retirer tout ce plat). Pour remplacer un plat par un autre : retire l'ancien ET ajoute le nouveau.
+- Le panier actuel est affiché dans ÉTAT ACTUEL. Dans "articles_ajouter", mets UNIQUEMENT les plats nouveaux demandés dans CE message : une entrée par plat avec "plat" (le numéro), "quantite" (entier, 1 si non précisé) et "precision" (ex : "sans piment", sinon null). Ne répète jamais des plats déjà dans le panier.
+- Pour retirer ou diminuer : "articles_retirer" avec "plat" (le numéro) et "quantite" (null = retirer tout ce plat). Pour remplacer un plat par un autre : retire l'ancien ET ajoute le nouveau.
 - Une seule commande peut contenir PLUSIEURS plats différents. Un client peut commander 2, 4, 6 plats ou plus dans un seul message ou en plusieurs messages : remplis une entrée par plat dans "articles_ajouter", ils vont tous dans le même panier. Tu ne fais que transmettre les plats et quantités : le système calcule la facture et enregistre la commande.
 - Si le client demande seulement une info sur un plat, ne touche pas au panier.
 - Quand tu modifies le panier, "reponse" doit être au plus UNE courte phrase (par exemple pour signaler un plat absent du menu) ou vide : le système affiche lui-même le récapitulatif, le total et le jour de retrait. Ne calcule JAMAIS de total, ne recopie pas le panier.
-- Il faut aussi un nom et un numéro de téléphone. Un seul nom OU prénom suffit. Remplis "nom" et "contact" uniquement avec ce que le client a réellement écrit, n'invente jamais. Ne les redemande jamais s'ils sont déjà dans ÉTAT ACTUEL. Un numéro de Côte d'Ivoire a 10 chiffres (ex. 0172369740), parfois écrit avec espaces, points, tirets ou +225. S'il n'a pas 10 chiffres, laisse contact vide et redemande poliment un numéro à 10 chiffres.
+- Il faut aussi un nom et un numéro de téléphone. Un seul nom OU prénom suffit. Remplis "nom" et "contact" uniquement avec ce que le client a réellement écrit, n'invente jamais. Ne les redemande jamais s'ils sont déjà dans ÉTAT ACTUEL. Un numéro de Côte d'Ivoire a 10 chiffres (ex. 0172369740), parfois écrit avec espaces, points, tirets ou +225. S'il n'a pas 10 chiffres, laisse contact vide et redemande poliment un numéro à 10 chiffres. Attention : un numéro à 10 chiffres est un téléphone, jamais un numéro de plat.
 - Si le client donne le nom et le numéro d'un coup (ex : "madani 0567890612"), prends les deux. Si le client donne plat, quantités, nom et numéro dans un même message, remplis tout d'un coup.
-- Si le client hésite ou demande conseil, recommande 1 ou 2 plats du menu avec leur prix.
+- Si le client hésite ou demande conseil, recommande 1 ou 2 plats du menu avec leur numéro et leur prix.
 - Ne dis JAMAIS que la commande est enregistrée ou validée et n'invente JAMAIS de code : le système le fait seulement après la confirmation du client. Mets "confirmer" à true uniquement si le client confirme clairement le récapitulatif déjà montré, sans rien modifier dans ce même message.
 - Si le client veut annuler ou recommencer sa saisie en cours, mets "annuler" à true.
 - Les commandes déjà validées (liste ci-dessous) sont distinctes du panier : si le client veut commander "encore" quelque chose après une commande validée, c'est une NOUVELLE commande avec son propre code. Si ce n'est pas clair, demande-lui simplement s'il veut une nouvelle commande.
@@ -1186,10 +1241,10 @@ function decisionSecours(texte, etat) {
   const plat = trouverPlat(nomPlat);
 
   if (plat) {
-    return { articles_ajouter: [{ plat: plat.lettre, quantite: quantite || 1 }], reponse: null };
+    return { articles_ajouter: [{ plat: String(plat.numero), quantite: quantite || 1 }], reponse: null };
   }
 
-  // Mot-clé ("porc", "porc sauter"...) : on présente tous les plats liés
+  // Mot-clé ("porc", "je veux porc", "porc sauter"...) : on présente tous les plats liés
   const lies = platsLies(texte);
   if (lies.length) {
     return { reponse: reponseSuggestions(texte, lies) };
@@ -1302,9 +1357,25 @@ async function traiterMessage(from, texteBrut, meta = {}) {
     etat.contact = etat.contact || profil.contact;
   }
 
-  // Recherche directe : "porc", "porc sauter", "il y a porc ?" -> on présente tous les plats liés.
+  // Commande par numéros ("3", "2 et 5", "3 x2") : lue directement par le code, sans IA
+  const numeros = !etat.avisAttendu ? lireNumeros(texte) : null;
+
+  if (numeros) {
+    const hors = numeros.filter(x => x.numero < 1 || x.numero > PLATS.length);
+
+    if (hors.length) {
+      const liste = [...new Set(hors.map(x => x.numero))].join(", ");
+      const rep = PLATS.length
+        ? `Le numéro ${liste} n'existe pas dans notre menu 😊\n\n${menuBloc()}`
+        : menuBloc();
+
+      return await repondreSimple(from, etat, texte, rep);
+    }
+  }
+
+  // Recherche directe : "porc", "je veux porc", "porc sauter", "il y a porc ?" -> on présente tous les plats liés.
   // Fiable même si Gemini est en panne, et fonctionne aussi au tout premier message.
-  if (!/\d/.test(texte) && texte.trim().length <= 60 && !trouverPlat(texte)) {
+  if (!numeros && !/\d/.test(texte) && texte.trim().length <= 60 && !trouverPlat(texte)) {
     const lies = platsLies(texte);
     if (lies.length) {
       return await repondreSuggestions(from, etat, texte, texte, lies);
@@ -1319,10 +1390,12 @@ async function traiterMessage(from, texteBrut, meta = {}) {
 
   const pauseLongue = Date.now() - (etat.maj || 0) > PAUSE_LONGUE_MS;
 
-  // Premier message, ou retour après une pause : accueil + menu (sauf si le client écrit directement un plat)
+  // Premier message, ou retour après une pause : accueil + menu
+  // (sauf si le client écrit directement un plat ou des numéros de plats)
   const premierContact =
     (etat.hist.length === 0 || pauseLongue) &&
     etat.panier.length === 0 &&
+    !numeros &&
     !trouverPlat(texte);
 
   // Message court sans question : on accueille directement. Sinon l'IA répond et le menu est ajouté.
@@ -1337,10 +1410,17 @@ async function traiterMessage(from, texteBrut, meta = {}) {
 
   let decision = null;
 
-  try {
-    decision = await demanderGemini(construirePrompt(texte, etat, commandes, profil, nomWhatsApp));
-  } catch (error) {
-    console.error("Gemini indisponible :", error.message);
+  if (numeros) {
+    decision = {
+      articles_ajouter: numeros.map(x => ({ plat: String(x.numero), quantite: x.quantite, precision: null })),
+      reponse: null
+    };
+  } else {
+    try {
+      decision = await demanderGemini(construirePrompt(texte, etat, commandes, profil, nomWhatsApp));
+    } catch (error) {
+      console.error("Gemini indisponible :", error.message);
+    }
   }
 
   let secours = false;
