@@ -55,11 +55,18 @@ const DUREE_ETAT_MS = 6 * 60 * 60 * 1000;
 const PAUSE_LONGUE_MS = 30 * 60 * 1000; // au-delà, un "cc" relance l'accueil + menu
 const MAX_LIGNES = 15; // plats différents dans un panier
 const MAX_QTE = 20;    // quantité maximale par ligne
-const SERVICE_CLIENT = "0719480884"; // téléphone du service client (souci, réclamation, demande ou sujet hors commande)
+const SERVICE_CLIENT = "0719480884";        // téléphone du service client (souci, réclamation, demande ou sujet hors commande)
+const SERVICE_CLIENT_2 = "+2250564061004";  // second numéro du service client
+const SERVICES_TXT = SERVICE_CLIENT + " ou " + SERVICE_CLIENT_2;
 
-// Redirection vers le service client : le numéro vient de SERVICE_CLIENT, jamais inventé
+// Redirection vers le service client : les numéros viennent des constantes, jamais inventés
 function contactService() {
-  return `📞 Service client Groupe Express : ${SERVICE_CLIENT} (appelez-nous, on vous répond rapidement)`;
+  return `📞 Service client Groupe Express : ${SERVICES_TXT} (appelez-nous, on vous répond rapidement)`;
+}
+
+// Quand le bot ne peut pas traiter une demande : simple renvoi vers le service client
+function messageRedirection() {
+  return `Pour cette demande, le mieux est de contacter directement notre service client 😊\n${contactService()}`;
 }
 
 // Réponse quand le client envoie un vocal, une image ou un autre fichier
@@ -837,9 +844,10 @@ ${menuLignes()}
 - Quand la commande est validée, le client reçoit un code de livraison (GE-XXXX) à présenter à la remise, puis le système lui demande son avis sur Groupe Express.
 - Les commandes sont prises de ${HEURE_REOUVERTURE}h00 à ${HEURE_FERMETURE}h00 (heure d'Abidjan), fermées entre ${HEURE_FERMETURE}h00 et ${HEURE_REOUVERTURE}h00.
 - Les plats se récupèrent sur place : à ${HEURE_RAPPEL_TEXTE}, un message prévient les clients de venir récupérer leurs plats.
-- Service client (téléphone) : ${SERVICE_CLIENT}. C'est LE numéro à donner quand le client a un souci, une demande, ou parle d'autre chose que commander un repas. Donne-le tel quel, ne le modifie jamais et n'invente aucun autre numéro.
+- Service client (téléphone) : ${SERVICES_TXT}. Ce sont LES numéros à donner quand le client a un souci, une demande, ou parle d'autre chose que commander un repas. Donne-les tels quels, ne les modifie jamais et n'invente aucun autre numéro.
+- Paiement : uniquement en espèces, au stand Groupe Express, à la livraison de la commande.
 - Les clients doivent écrire en texte : les vocaux, images et fichiers ne sont pas lus. Si le client dit avoir envoyé un vocal, demande-lui d'écrire son message.
-- Tu ne connais PAS : l'adresse exacte, les horaires d'ouverture, les moyens de paiement, les tarifs de livraison, la composition ou la taille des plats, les promotions, les délais précis, ni les boissons si elles ne sont pas au menu. Ne les invente JAMAIS.
+- Tu ne connais PAS : l'adresse exacte, les horaires d'ouverture, les tarifs de livraison, la composition ou la taille des plats, les promotions, les délais précis, ni les boissons si elles ne sont pas au menu. Ne les invente JAMAIS.
 
 À PROPOS DE GROUPE EXPRESS (tu peux en parler en détail, avec tes propres mots, quand on te le demande) :
 GROUPE EXPRESS est une entreprise dynamique spécialisée dans la distribution de repas universitaires. Sa mission : fournir aux étudiants et au personnel académique des repas de qualité, savoureux et équilibrés, à des prix très accessibles. Fondée avec la vision de lutter contre la malnutrition et d'améliorer les conditions de vie des étudiants dans les universités, elle propose une large gamme de plats traditionnels et modernes adaptés aux goûts et aux besoins des jeunes. Présente dans plusieurs établissements universitaires, elle se distingue par :
@@ -856,6 +864,8 @@ LES PERSONNES DERRIÈRE GROUPE EXPRESS :
 COMPRENDRE LES CLIENTS :
 - Les clients écrivent souvent en français ivoirien, avec de l'argot (nouchi), des abréviations de SMS (bjr, bsr, slt, cc, stp, svp, cmb, kom, c koi, jveux...), des fautes, des mots collés, des majuscules ou des messages très courts.
 - Comprends l'intention même si le message est mal écrit. Si vraiment ambigu, pose UNE seule question courte et ciblée au lieu d'inventer.
+- Si tu ne comprends vraiment pas la demande, ou si tu ne peux pas y répondre, ne dis JAMAIS que tu es perdu ou que tu ne comprends pas : invite simplement le client à contacter le service client au ${SERVICES_TXT}.
+- Tu réponds uniquement au message que le client vient d'envoyer. Tu n'écris jamais de ton initiative et tu ne promets jamais d'écrire plus tard, sauf le message de retrait envoyé par le système à ${HEURE_RAPPEL_TEXTE}.
 - Reconnais les plats malgré les fautes (attiéké/atieke, tchèpe/tchep, spag/spaghetti, garba...).
 - Le client n'écrit presque jamais le nom exact du menu : il raccourcit, tronque les mots, ne garde que le début ou les initiales (ex : "sau gra" = Sauce graine, "atk poisson" = Attiéké poisson, "poul brais" = poulet braisé). Cherche toujours le plat du menu qui correspond le mieux, même si le nom est incomplet ou déformé, et mets sa lettre dans "plat". Ne demande JAMAIS au client d'écrire le nom exact. Si UN SEUL plat est plausible, prends-le directement. Si DEUX plats ou plus sont plausibles (ex : "sauce" alors qu'il y a plusieurs sauces), pose UNE question courte en citant ces plats par leur nom, sans modifier le panier.
 - Si le client donne son avis, un compliment ou une critique sur les plats ou le service, copie-le fidèlement (court) dans "avis" et remercie-le chaleureusement. Ne mets dans "avis" que de vrais avis, jamais une question ni une commande.
@@ -864,10 +874,10 @@ COMPRENDRE LES CLIENTS :
 - Réponses courtes (2 à 5 lignes) pour les échanges normaux. MAIS si le client demande ce qu'est Groupe Express, sa mission, son histoire ou ses valeurs, réponds en détail (une présentation complète et chaleureuse, avec les points forts en liste et des emojis). Si le client te pose une question générale, réponds-lui utilement et naturellement, sans tout ramener à la commande ; propose le menu seulement quand c'est pertinent.
 - Tu es vif, malin et nuancé : tu relies les informations, tu anticipes ce que le client veut vraiment.
 - Quelques emojis 🍽️📦😊 sans exagérer, style WhatsApp.
-- Si le client est mécontent, reste calme et poli, excuse-toi simplement, propose de transmettre sa remarque et donne-lui le numéro du service client ${SERVICE_CLIENT}.
-- SOUCI : si le client rencontre un problème (plat manquant ou différent, erreur de prix ou de total, commande qui tarde, paiement, annulation ou modification d'une commande déjà validée, réclamation, ou toute demande que tu ne peux pas régler toi-même), excuse-toi simplement, rassure-le, puis invite-le à appeler le service client au ${SERVICE_CLIENT}.
-- DEMANDES : toute demande, question ou requête que tu ne peux pas traiter toi-même (modification ou annulation d'une commande validée, réclamation, information que tu ne connais pas, parler à un responsable) doit être redirigée vers le service client : dis-lui d'appeler le ${SERVICE_CLIENT}. Donne ce numéro tel quel.
-- HORS SUJET : si le client parle d'autre chose que les repas de Groupe Express, réponds brièvement et poliment, puis ramène la conversation vers les repas et donne-lui le numéro du service client ${SERVICE_CLIENT} s'il souhaite parler à une personne.
+- Si le client est mécontent, reste calme et poli, excuse-toi simplement, propose de transmettre sa remarque et donne-lui le numéro du service client ${SERVICES_TXT}.
+- SOUCI : si le client rencontre un problème (plat manquant ou différent, erreur de prix ou de total, commande qui tarde, paiement, annulation ou modification d'une commande déjà validée, réclamation, ou toute demande que tu ne peux pas régler toi-même), excuse-toi simplement, rassure-le, puis invite-le à appeler le service client au ${SERVICES_TXT}.
+- DEMANDES : toute demande, question ou requête que tu ne peux pas traiter toi-même (modification ou annulation d'une commande validée, réclamation, information que tu ne connais pas, parler à un responsable) doit être redirigée vers le service client : dis-lui d'appeler le ${SERVICES_TXT}. Donne ce numéro tel quel.
+- HORS SUJET : si le client parle d'autre chose que les repas de Groupe Express, réponds brièvement et poliment, puis ramène la conversation vers les repas et donne-lui le numéro du service client ${SERVICES_TXT} s'il souhaite parler à une personne.
 
 COMMENT TU GÈRES LE PANIER :
 - Le panier actuel est affiché dans ÉTAT ACTUEL. Dans "articles_ajouter", mets UNIQUEMENT les plats nouveaux demandés dans CE message : une entrée par plat avec "plat" (la lettre), "quantite" (entier, 1 si non précisé) et "precision" (ex : "sans piment", sinon null). Ne répète jamais des plats déjà dans le panier.
@@ -882,7 +892,7 @@ COMMENT TU GÈRES LE PANIER :
 - Si le client veut annuler ou recommencer sa saisie en cours, mets "annuler" à true.
 - Les commandes déjà validées (liste ci-dessous) sont distinctes du panier : si le client veut commander "encore" quelque chose après une commande validée, c'est une NOUVELLE commande avec son propre code. Si ce n'est pas clair, demande-lui simplement s'il veut une nouvelle commande.
 - Si le client demande où en est sa commande ou son code, appuie-toi uniquement sur la liste "Commandes du client aujourd'hui" ci-dessous. Tu ne parles que des commandes de CE client.
-- Si le client demande une chose que tu ne sais pas, ou veut modifier/annuler une commande déjà validée, ou fait une réclamation, ou veut parler à un responsable : explique simplement que tu n'as pas l'information, et mets dans "a_transmettre" un résumé court de sa demande. Le système préviendra l'équipe : ne le dis pas toi-même. Dans "reponse", invite-le toujours à appeler le service client au ${SERVICE_CLIENT}.
+- Si le client demande une chose que tu ne sais pas, ou veut modifier/annuler une commande déjà validée, ou fait une réclamation, ou veut parler à un responsable : explique simplement que tu n'as pas l'information, et mets dans "a_transmettre" un résumé court de sa demande. Le système préviendra l'équipe : ne le dis pas toi-même. Dans "reponse", invite-le toujours à appeler le service client au ${SERVICES_TXT}.
 - Si tu dois montrer le menu (premier message, demande de menu/plats/prix), mets "montrer_menu" à true et fais seulement une courte phrase d'accueil : le système ajoute la liste lui-même, ne la recopie pas.
 - Si le client demande qui a conçu/créé/développé ce programme ou ce chatbot : mets "image" à "createur" et dans "reponse" présente ZINZINDOHOUE MARCIO JARDEL (le texte sera envoyé avec sa photo).
 - Si le client demande qui est le responsable, le patron, le chef ou le dirigeant de Groupe Express : mets "image" à "responsable" et dans "reponse" présente KOLO DAGNOGO (le texte sera envoyé avec sa photo).
@@ -1018,12 +1028,11 @@ function decisionSecours(texte, etat) {
 
   const salut = /^(bonjour|bjr|bonsoir|bsr|salut|slt|cc|coucou|hello|hey|menu|plats?)\b/.test(t);
 
-  return {
-    montrer_menu: true,
-    reponse: salut
-      ? "Bienvenue chez Groupe Express 🍽️"
-      : "Je suis un peu perdu pour le moment 😅 Voici nos plats :"
-  };
+  if (salut) {
+    return { montrer_menu: true, reponse: "Bienvenue chez Groupe Express 🍽️" };
+  }
+
+  return { montrer_menu: false, reponse: messageRedirection() };
 }
 
 // Empêche l'IA d'annoncer une commande, un code ou un total qui n'existent pas
@@ -1135,13 +1144,16 @@ async function traiterMessage(from, texteBrut, meta = {}) {
 
   const pauseLongue = Date.now() - (etat.maj || 0) > PAUSE_LONGUE_MS;
 
-  // Premier message, ou retour après une pause : simple salut -> accueil + menu
-  if (
+  // Premier message, ou retour après une pause : accueil + menu (sauf si le client écrit directement un plat)
+  const premierContact =
     (etat.hist.length === 0 || pauseLongue) &&
     etat.panier.length === 0 &&
-    !trouverPlat(texte) &&
-    (estSalut || texte.trim().length <= 3)
-  ) {
+    !trouverPlat(texte);
+
+  // Message court sans question : on accueille directement. Sinon l'IA répond et le menu est ajouté.
+  const messageSimple = estSalut || (texte.trim().length <= 40 && !/\?/.test(texte));
+
+  if (premierContact && messageSimple) {
     const accueil = menuTexte(profil && profil.nom);
     etat.hist.push({ r: "c", t: texte }, { r: "b", t: "Bienvenue + menu envoyé" });
     await ecrireEtat(from, { panier: [], recap: false, nom: null, contact: null, avisAttendu: etat.avisAttendu, hist: etat.hist });
@@ -1161,6 +1173,8 @@ async function traiterMessage(from, texteBrut, meta = {}) {
     secours = true;
     decision = decisionSecours(texte, etat);
   }
+
+  if (premierContact && !messageSimple) decision.montrer_menu = true;
 
   const corpusClient = [texte]
     .concat(etat.hist.filter(h => h.r === "c").map(h => h.t))
@@ -1314,7 +1328,7 @@ async function traiterMessage(from, texteBrut, meta = {}) {
       if (ok) {
         const note =
           `📝 Votre demande a bien été notée.\n` +
-          `Pour qu'elle soit traitée rapidement, merci d'appeler directement le service client au *${SERVICE_CLIENT}*.`;
+          `Pour qu'elle soit traitée rapidement, merci d'appeler directement le service client au *${SERVICES_TXT}*.`;
         reponse = typeof reponse === "string" && reponse.trim() ? reponse + "\n\n" + note : note;
       }
     }
@@ -1363,22 +1377,41 @@ async function envoyerRappels() {
 
   const resultats = await Promise.allSettled(
     [...parClient.entries()].map(async ([chatId, commandes]) => {
-      const plats = commandes.map(c => `${c.plat} (${c.code || c.id})`).join(", ");
-      const nom = commandes[0].nom;
-
-      await sendWhatsApp(
-        chatId,
-        `Bonjour ${nom} 😊\n\n` +
-          `Votre commande (${plats}) est prête 🍽️\n` +
-          `Merci de venir la récupérer 📦\n\n` +
-          `Groupe Express vous souhaite bon appétit !`
-      );
+      // On réserve chaque commande AVANT l'envoi : un second passage (cron, file admin) ne la retrouvera plus
+      const reservees = [];
 
       for (const c of commandes) {
-        await firestore.collection("commandes").doc(c.id).update({
-          statut: "rappel_envoye",
-          rappelEnvoyeLe: new Date().toISOString()
+        const ref = firestore.collection("commandes").doc(c.id);
+
+        const ok = await firestore.runTransaction(async t => {
+          const cur = await t.get(ref);
+          if (!cur.exists || cur.data().statut !== "en_attente") return false;
+          t.update(ref, { statut: "rappel_envoye", rappelEnvoyeLe: new Date().toISOString() });
+          return true;
         });
+
+        if (ok) reservees.push(c);
+      }
+
+      if (!reservees.length) return;
+
+      const plats = reservees.map(c => `${c.plat} (${c.code || c.id})`).join(", ");
+      const nom = reservees[0].nom;
+
+      try {
+        await sendWhatsApp(
+          chatId,
+          `Bonjour ${nom} 😊\n\n` +
+            `Votre commande (${plats}) est prête 🍽️\n` +
+            `Merci de venir la récupérer 📦\n\n` +
+            `Groupe Express vous souhaite bon appétit !`
+        );
+      } catch (error) {
+        // Envoi raté : on remet les commandes en attente pour un nouvel essai
+        for (const c of reservees) {
+          await firestore.collection("commandes").doc(c.id).update({ statut: "en_attente" }).catch(() => {});
+        }
+        throw error;
       }
     })
   );
@@ -1712,12 +1745,36 @@ async function envoyerMorceau(from, morceau) {
   }
 }
 
+// Plafond de sécurité : au-delà, on ignore (boucle, bot adverse) pour ne pas être signalé comme spam
+const MAX_MESSAGES_PAR_MINUTE = 15;
+const COMPTEURS = new Map();
+
+function tropDeMessages(from) {
+  const maintenant = Date.now();
+  const recents = (COMPTEURS.get(from) || []).filter(t => maintenant - t < 60000);
+  recents.push(maintenant);
+  COMPTEURS.set(from, recents);
+
+  if (COMPTEURS.size > 5000) {
+    for (const [k, v] of COMPTEURS) {
+      if (!v.some(t => maintenant - t < 60000)) COMPTEURS.delete(k);
+    }
+  }
+
+  return recents.length > MAX_MESSAGES_PAR_MINUTE;
+}
+
 async function traiterMessageEntrant(msg) {
   const from = msg.from;
 
   console.log("Message entrant de :", msg.from, "type :", msg.type);
 
   if (!from || !msg.id) return;
+
+  // Le bot répond uniquement en conversation privée (ni groupes, ni statuts)
+  if (/@g\.us$|status@broadcast$|@newsletter$/.test(from)) return;
+
+  if (tropDeMessages(from)) return;
 
   if (!(await marquerTraite(msg.id))) return;
 
@@ -1738,10 +1795,13 @@ async function traiterMessageEntrant(msg) {
     }
   } catch (error) {
     console.error("Traitement du message :", error.message);
-    reponse = "Désolé, j'ai eu un petit souci technique 😅 Pouvez-vous répéter votre message ?";
+    reponse =
+      "Désolé, j'ai eu un petit souci technique 😅 Pouvez-vous répéter votre message dans un instant ?\n\n" +
+      contactService();
   }
 
   for (const morceau of [].concat(reponse)) {
+    await attendre(1000 + Math.floor(Math.random() * 2000)); // pause naturelle avant chaque envoi
     await envoyerMorceau(from, morceau);
   }
 }
