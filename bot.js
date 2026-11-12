@@ -30,8 +30,10 @@ const IMAGES = {
   responsable: "f.jpg"
 };
 
-// Vérifiez que ce modèle existe pour votre clé ; sinon définissez GEMINI_MODEL dans Render
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
+// Modèle principal (le plus récent) et modèle de secours (plus rapide) si le premier échoue.
+// Vous pouvez les changer sans toucher au code : GEMINI_MODEL et GEMINI_MODEL_SECOURS dans Render.
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.7-flash";
+const GEMINI_MODEL_SECOURS = process.env.GEMINI_MODEL_SECOURS || "gemini-3.5-flash-lite";
 const GEMINI_TIMEOUT_MS = 9000;
 const FUSEAU = "Africa/Abidjan";
 const HEURE_RAPPEL_TEXTE = "12h00"; // heure de retrait des plats
@@ -334,6 +336,94 @@ function platDepuisRef(ref) {
   const r = String(ref || "").trim();
   if (!r) return null;
   return PLATS.find(p => p.lettre === r.toUpperCase()) || trouverPlat(r);
+}
+
+// ===============================
+// RECHERCHE DE PLATS LIÉS ("porc", "porc sauter", "il y a porc ?")
+// ===============================
+
+const MOTS_VIDES_RECHERCHE = [
+  "il", "y", "ya", "as", "avez", "vous", "tu", "est", "ce", "ca", "que", "qui", "quoi",
+  "quel", "quelle", "quels", "quelles", "cest", "qu", "en", "pour", "sur", "vend", "vendez",
+  "avoir", "reste", "dispo", "disponible", "disponibles", "plat", "plats", "menu", "prix",
+  "cmb", "combien", "cherche", "voir", "donne", "donnez", "mon", "ma", "mes", "on", "si",
+  "ou", "pas", "ne", "bonjour", "bonsoir", "salut", "bjr", "bsr", "slt", "merci"
+];
+
+function motsRecherche(texte) {
+  return motsPlat(texte).filter(m => m.length >= 3 && !MOTS_VIDES_RECHERCHE.includes(m));
+}
+
+// Tous les plats qui ont un rapport avec le texte (mot du nom ou de la catégorie).
+// Si certains plats correspondent à TOUS les mots, on ne garde qu'eux ; sinon on garde ceux qui en contiennent au moins un.
+function platsLies(texte) {
+  const mots = motsRecherche(texte);
+  if (!mots.length || !PLATS.length) return [];
+
+  const evalues = PLATS.map((p, idx) => {
+    const motsNom = motsPlat(p.nom).concat(motsPlat(p.categorie));
+    let trouves = 0;
+    let score = 0;
+
+    for (const w of mots) {
+      let best = 0;
+      for (const x of motsNom) {
+        const s = scoreMot(w, x);
+        if (s >= 0.8 && s > best) best = s; // exact, début de mot ou petite faute (pas les abréviations trop floues)
+      }
+      if (best > 0) { trouves++; score += best; }
+    }
+
+    return { p, idx, trouves, score };
+  }).filter(x => x.trouves > 0);
+
+  if (!evalues.length) return [];
+
+  const tous = evalues.filter(x => x.trouves === mots.length);
+  const retenus = tous.length ? tous : evalues;
+
+  return retenus.sort((a, b) => a.idx - b.idx).map(x => x.p);
+}
+
+function reponseSuggestions(requete, trouves) {
+  const sujet = String(requete || "").trim().slice(0, 40);
+  let cat = null;
+  let corps = "";
+
+  trouves.slice(0, 25).forEach(p => {
+    if (p.categorie !== cat) {
+      cat = p.categorie;
+      corps += `\n*${cat}*\n`;
+    }
+    corps += `• ${p.nom} : ${prixTexte(p)}\n`;
+  });
+
+  const intro = trouves.length === 1
+    ? `Oui 😊 Voici ce que nous avons pour « ${sujet} » :`
+    : `Oui 😊 Voici nos plats qui correspondent à « ${sujet} » :`;
+
+  return (
+    `${intro}\n${corps.trimEnd()}\n\n` +
+    `Dites-moi lequel vous voulez (avec la quantité) et je le note tout de suite 🍽️`
+  );
+}
+
+// Envoie la liste des plats trouvés sans toucher au panier
+async function repondreSuggestions(from, etat, texte, requete, trouves) {
+  const reponse = reponseSuggestions(requete, trouves);
+
+  etat.hist.push({ r: "c", t: texte }, { r: "b", t: reponse.slice(0, 300) });
+  await ecrireEtat(from, {
+    panier: etat.panier,
+    recap: etat.recap,
+    recapRetrait: etat.recapRetrait,
+    nom: etat.nom,
+    contact: etat.contact,
+    avisAttendu: etat.avisAttendu,
+    hist: etat.hist
+  });
+
+  return reponse;
 }
 
 // Numéro ivoirien : 10 chiffres (ex. 0172369740), avec ou sans +225 / 00225, espaces, points ou tirets
@@ -850,6 +940,7 @@ const SCHEMA_REPONSE = {
     montrer_menu: { type: "BOOLEAN" },
     a_transmettre: { type: "STRING", nullable: true },
     avis: { type: "STRING", nullable: true },
+    recherche: { type: "STRING", nullable: true },
     image: { type: "STRING", nullable: true }
   },
   required: ["reponse"]
@@ -926,7 +1017,7 @@ COMPRENDRE LES CLIENTS :
 - Reconnais les plats malgré les fautes (attiéké/atieke, tchèpe/tchep, spag/spaghetti, garba...).
 - Le client n'écrit presque jamais le nom exact du menu : il raccourcit, tronque les mots, ne garde que le début ou les initiales (ex : "sau gra" = Sauce graine, "atk poisson" = Attiéké poisson, "poul brais" = poulet braisé). Cherche toujours le plat du menu qui correspond le mieux, même si le nom est incomplet ou déformé, et mets sa lettre dans "plat". Ne demande JAMAIS au client d'écrire le nom exact. Si UN SEUL plat est plausible, prends-le directement. Si DEUX plats ou plus sont plausibles (ex : "sauce" alors qu'il y a plusieurs sauces), pose UNE question courte en citant ces plats par leur nom, sans modifier le panier.
 - Si le client donne son avis, un compliment ou une critique sur les plats ou le service, copie-le fidèlement (court) dans "avis" et remercie-le chaleureusement. Ne mets dans "avis" que de vrais avis, jamais une question ni une commande.
-- Si le client parle d'un plat qui n'est pas au menu, dis-le gentiment (dans "reponse") et propose le menu. Ne prétends pas qu'il existe.
+- Si le client parle d'un plat qui n'est pas au menu ET qu'aucun plat du menu ne lui ressemble, dis-le gentiment (dans "reponse") et propose le menu. Ne prétends pas qu'il existe.
 - Réponds dans la langue du client (français par défaut), avec des mots simples. Vouvoie par défaut, tutoie si le client tutoie.
 - Réponses courtes (2 à 5 lignes) pour les échanges normaux. MAIS si le client demande ce qu'est Groupe Express, sa mission, son histoire ou ses valeurs, réponds en détail (une présentation complète et chaleureuse, avec les points forts en liste et des emojis). Si le client te pose une question générale, réponds-lui utilement et naturellement, sans tout ramener à la commande ; propose le menu seulement quand c'est pertinent.
 - Tu es vif, malin et nuancé : tu relies les informations, tu anticipes ce que le client veut vraiment.
@@ -935,6 +1026,10 @@ COMPRENDRE LES CLIENTS :
 - SOUCI : si le client rencontre un problème (plat manquant ou différent, erreur de prix ou de total, commande qui tarde, paiement, annulation ou modification d'une commande déjà validée, réclamation, ou toute demande que tu ne peux pas régler toi-même), excuse-toi simplement, rassure-le, puis invite-le à appeler le service client au ${SERVICES_TXT}.
 - DEMANDES : toute demande, question ou requête que tu ne peux pas traiter toi-même (modification ou annulation d'une commande validée, réclamation, information que tu ne connais pas, parler à un responsable) doit être redirigée vers le service client : dis-lui d'appeler le ${SERVICES_TXT}. Donne ce numéro tel quel.
 - HORS SUJET : si le client parle d'autre chose que les repas de Groupe Express, réponds brièvement et poliment, puis ramène la conversation vers les repas et donne-lui le numéro du service client ${SERVICES_TXT} s'il souhaite parler à une personne.
+
+RECHERCHE DE PLATS (très important) :
+- Si le client demande un type de plat, un ingrédient ou un plat qui n'est pas exactement au menu mais qui y ressemble (ex : "porc", "poisson", "il y a porc ?", "porc sauter", "porc au four", "vous avez du poulet ?", "pâtes"), mets le mot-clé principal dans "recherche" (ex : "porc"), laisse "reponse" vide et ne touche pas au panier. Le système affiche lui-même tous les plats du menu qui correspondent.
+- Ne redirige JAMAIS vers le service client pour ce genre de demande, et ne dis pas qu'un plat n'existe pas avant que le système ait présenté ce qui y ressemble.
 
 COMMENT TU GÈRES LE PANIER :
 - Le panier actuel est affiché dans ÉTAT ACTUEL. Dans "articles_ajouter", mets UNIQUEMENT les plats nouveaux demandés dans CE message : une entrée par plat avec "plat" (la lettre), "quantite" (entier, 1 si non précisé) et "precision" (ex : "sans piment", sinon null). Ne répète jamais des plats déjà dans le panier.
@@ -971,11 +1066,11 @@ ${historique}
 Nouveau message du client :
 """${texte}"""
 
-Réponds uniquement avec un objet JSON ayant les champs : reponse (texte pour le client), articles_ajouter, articles_retirer, confirmer, nom, contact, annuler, montrer_menu, a_transmettre, avis, image. Mets null (ou false) pour ce qui ne s'applique pas.
+Réponds uniquement avec un objet JSON ayant les champs : reponse (texte pour le client), articles_ajouter, articles_retirer, confirmer, nom, contact, annuler, montrer_menu, a_transmettre, avis, recherche, image. Mets null (ou false) pour ce qui ne s'applique pas.
 `;
 }
 
-async function appelGemini(prompt, avecSchema) {
+async function appelGemini(prompt, avecSchema, modele) {
   const apiKey = await getGeminiKey();
 
   if (!apiKey) {
@@ -991,7 +1086,7 @@ async function appelGemini(prompt, avecSchema) {
   if (avecSchema) generationConfig.responseSchema = SCHEMA_REPONSE;
 
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${modele}:generateContent`,
     {
       method: "POST",
       headers: {
@@ -1045,13 +1140,29 @@ function lireDecision(texte) {
   return objet;
 }
 
-async function demanderGemini(prompt) {
+// Essaie un modèle avec le schéma, puis sans schéma si le schéma est refusé (erreur 400)
+async function essayerModele(prompt, modele) {
   try {
-    return await appelGemini(prompt, true);
+    return await appelGemini(prompt, true, modele);
   } catch (error) {
     if (error.status === 400) {
-      return await appelGemini(prompt, false);
+      return await appelGemini(prompt, false, modele);
     }
+    throw error;
+  }
+}
+
+// Modèle principal, puis modèle de secours (plus rapide) s'il échoue ou dépasse le délai
+async function demanderGemini(prompt) {
+  try {
+    return await essayerModele(prompt, GEMINI_MODEL);
+  } catch (error) {
+    console.error(`Gemini (${GEMINI_MODEL}) en échec :`, error.message);
+
+    if (GEMINI_MODEL_SECOURS && GEMINI_MODEL_SECOURS !== GEMINI_MODEL) {
+      return await essayerModele(prompt, GEMINI_MODEL_SECOURS);
+    }
+
     throw error;
   }
 }
@@ -1076,6 +1187,12 @@ function decisionSecours(texte, etat) {
 
   if (plat) {
     return { articles_ajouter: [{ plat: plat.lettre, quantite: quantite || 1 }], reponse: null };
+  }
+
+  // Mot-clé ("porc", "porc sauter"...) : on présente tous les plats liés
+  const lies = platsLies(texte);
+  if (lies.length) {
+    return { reponse: reponseSuggestions(texte, lies) };
   }
 
   if (etat.panier.length) {
@@ -1185,6 +1302,15 @@ async function traiterMessage(from, texteBrut, meta = {}) {
     etat.contact = etat.contact || profil.contact;
   }
 
+  // Recherche directe : "porc", "porc sauter", "il y a porc ?" -> on présente tous les plats liés.
+  // Fiable même si Gemini est en panne, et fonctionne aussi au tout premier message.
+  if (!/\d/.test(texte) && texte.trim().length <= 60 && !trouverPlat(texte)) {
+    const lies = platsLies(texte);
+    if (lies.length) {
+      return await repondreSuggestions(from, etat, texte, texte, lies);
+    }
+  }
+
   const nomWhatsApp = !etat.nom && meta.pushName ? String(meta.pushName).slice(0, 40) : null;
 
   const estSalut = /^(bonjour|bjr|bonsoir|bsr|salut|slt|cc|coucou|hello|hey|menu|plats?)\b/.test(
@@ -1224,6 +1350,15 @@ async function traiterMessage(from, texteBrut, meta = {}) {
   }
 
   if (premierContact && !messageSimple) decision.montrer_menu = true;
+
+  // Gemini a identifié une recherche de plats : on présente tous les plats liés, sans toucher au panier
+  const recherche = typeof decision.recherche === "string" ? decision.recherche.trim() : "";
+  if (recherche && decision.confirmer !== true && decision.annuler !== true) {
+    const lies = platsLies(recherche);
+    if (lies.length) {
+      return await repondreSuggestions(from, etat, texte, recherche, lies);
+    }
+  }
 
   const corpusClient = [texte]
     .concat(etat.hist.filter(h => h.r === "c").map(h => h.t))
