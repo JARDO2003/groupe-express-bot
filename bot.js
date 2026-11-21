@@ -35,7 +35,7 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
 const GEMINI_TIMEOUT_MS = 9000;
 const FUSEAU = "Africa/Abidjan";
 const HEURE_RAPPEL_TEXTE = "12h00"; // heure de retrait des plats
-const HEURE_FERMETURE = 11;   // à partir de 11h (heure d'Abidjan), plus de commandes
+const HEURE_FERMETURE = 10;   // à partir de 10h (heure d'Abidjan), plus de commandes
 const HEURE_REOUVERTURE = 17; // les commandes rouvrent à 17h
 
 function heureAbidjan() {
@@ -1242,7 +1242,7 @@ async function traiterMessage(from, texteBrut, meta = {}) {
     return oubli;
   }
 
-  // Commandes fermées de 11h à 17h (heure d'Abidjan)
+  // Commandes fermées de 10h à 17h (heure d'Abidjan)
   if (commandesFermees()) {
     const ferme =
       `${salutation()} 👋 Les commandes sont fermées pour le moment ⏰\n` +
