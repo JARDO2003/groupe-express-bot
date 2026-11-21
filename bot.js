@@ -30,14 +30,13 @@ const IMAGES = {
   responsable: "f.jpg"
 };
 
-// Modèle principal (le plus récent) et modèle de secours (plus rapide) si le premier échoue.
-// Vous pouvez les changer sans toucher au code : GEMINI_MODEL et GEMINI_MODEL_SECOURS dans Render.
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.7-flash";
-const GEMINI_MODEL_SECOURS = process.env.GEMINI_MODEL_SECOURS || "gemini-3.5-flash-lite";
+// Vérifiez que ce modèle existe pour votre clé ; sinon définissez GEMINI_MODEL dans Render
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
 const GEMINI_TIMEOUT_MS = 9000;
 const FUSEAU = "Africa/Abidjan";
 const HEURE_RAPPEL_TEXTE = "12h00"; // heure de retrait des plats
-const HEURE_LIMITE = 11; // avant 11h (heure d'Abidjan) : retrait le jour même ; à partir de 11h : retrait le lendemain
+const HEURE_FERMETURE = 11;   // à partir de 11h (heure d'Abidjan), plus de commandes
+const HEURE_REOUVERTURE = 17; // les commandes rouvrent à 17h
 
 function heureAbidjan() {
   return Number(
@@ -45,9 +44,9 @@ function heureAbidjan() {
   ) % 24;
 }
 
-// Les commandes sont prises 24h/24 ; passé la limite, elles sont à récupérer le lendemain
-function apresLimite() {
-  return heureAbidjan() >= HEURE_LIMITE;
+function commandesFermees() {
+  const h = heureAbidjan();
+  return h >= HEURE_FERMETURE && h < HEURE_REOUVERTURE;
 }
 
 const MAX_MESSAGE = 600;
@@ -65,6 +64,18 @@ function contactService() {
   return `📞 Service client Groupe Express : ${SERVICES_TXT} (appelez-nous, on vous répond rapidement)`;
 }
 
+// Bannière affichée en bas du message de validation de commande
+const BANNIERE_VALIDATION = [
+  "```",
+  "█▀▀ █▀▄ █▀█ █   █  █▀█   █▀▀",
+  "█▄█ █▀▄ █▄█ █▄█  █▀▀   ██▄",
+  "   ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬",
+  "█▀▀ ▀▄▀ █▀█ █▀▄ █▀▀ ▄▀▀ ▄▀▀",
+  "██▄ ▄▀▄ █▀▀ █▀▄ ██▄ ▄█  ▄█",
+  "      ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▶️",
+  "```"
+].join("\n");
+
 // Quand le bot ne peut pas traiter une demande : simple renvoi vers le service client
 function messageRedirection() {
   return `Pour cette demande, le mieux est de contacter directement notre service client 😊\n${contactService()}`;
@@ -78,7 +89,7 @@ function messageSansTexte(type) {
 
   return (
     `${salutation()} 😊 Je ne peux pas lire ${nature}.\n\n` +
-    `Merci de m'écrire votre message en *texte* (par exemple : « 2 attiéké poisson » ou simplement le *numéro* du plat).\n\n` +
+    `Merci de m'écrire votre message en *texte* (par exemple : « 2 attiéké poisson »).\n\n` +
     `Pour toute demande ou question, vous pouvez aussi appeler le service client :\n` +
     contactService()
   );
@@ -88,15 +99,12 @@ function messageSansTexte(type) {
 // MENU (collection Firestore "plats", géré uniquement depuis la page admin)
 // ===============================
 
-let PLATS = []; // plats actifs de la requête en cours (chacun avec son numéro 1, 2, 3...)
+let PLATS = []; // plats actifs de la requête en cours
 
+// Liste unique, numérotée dans l'ordre choisi sur la page admin (champ "ordre")
 function trierPlats(liste) {
-  const minCat = {};
-  liste.forEach(p => {
-    if (!(p.categorie in minCat) || p.ordre < minCat[p.categorie]) minCat[p.categorie] = p.ordre;
-  });
   return liste.sort((x, y) =>
-    minCat[x.categorie] - minCat[y.categorie] || x.ordre - y.ordre
+    (Number(x.ordre) || 0) - (Number(y.ordre) || 0) || String(x.nom).localeCompare(String(y.nom))
   );
 }
 
@@ -108,12 +116,90 @@ async function tousLesPlats() {
   return trierPlats(liste);
 }
 
-// Chaque plat actif reçoit un numéro continu (1, 2, 3...) montré au client.
-// "lettre" est conservé (sous forme de texte du numéro) pour rester compatible avec la page admin.
 async function chargerMenu() {
   const actifs = (await tousLesPlats()).filter(p => p.actif !== false);
-  PLATS = actifs.map((p, i) => ({ ...p, numero: i + 1, lettre: String(i + 1) }));
+  PLATS = actifs.map((p, i) => ({ ...p, lettre: etiquette(i) }));
+  await chargerPromos();
   return PLATS;
+}
+
+// ===============================
+// PROMOTIONS (collection Firestore "promotions", publiées depuis la page admin)
+// Exemple : 4 plats de porc à 3 000 F. Le prix promo s'applique automatiquement dans le panier.
+// ===============================
+
+let PROMOS = []; // promotions actives de la requête en cours
+
+async function chargerPromos() {
+  PROMOS = [];
+
+  try {
+    const snap = await firestore.collection("promotions").get();
+    const aujourdhui = dateJour();
+
+    snap.forEach(d => {
+      const p = d.data();
+      if (p.actif === false) return;
+      if (p.fin && String(p.fin) < aujourdhui) return; // promotion terminée
+      if (!Array.isArray(p.platIds) || !p.platIds.length) return;
+      if (!(Number(p.quantite) >= 2) || !(Number(p.prix) >= 0)) return;
+
+      PROMOS.push({
+        id: d.id,
+        titre: String(p.titre || "").slice(0, 80),
+        platIds: p.platIds,
+        quantite: Number(p.quantite),
+        prix: Number(p.prix),
+        date: String(p.date || "")
+      });
+    });
+
+    PROMOS.sort((a, b) => a.date.localeCompare(b.date));
+  } catch (error) {
+    console.error("Promotions non lues :", error.message);
+    PROMOS = [];
+  }
+}
+
+// Texte des promotions montré aux clients (numéros du menu)
+function promosTexte() {
+  const lignes = [];
+
+  for (const promo of PROMOS) {
+    const numeros = [];
+    PLATS.forEach((p, i) => { if (promo.platIds.includes(p.id)) numeros.push(numeroPlat(i)); });
+    if (!numeros.length) continue;
+
+    const titre = promo.titre || `${promo.quantite} plats`;
+    const quoi = numeros.length === 1
+      ? `${promo.quantite} × le n°${numeros[0]}`
+      : `${promo.quantite} plats parmi les n°${numeros.join(", ")}`;
+
+    lignes.push(`🎁 *${titre}* : ${quoi} ➜ *${prixF(promo.prix)}*`);
+  }
+
+  return lignes.length ? "🎁 *Promotions*\n" + lignes.join("\n") : "";
+}
+
+function promosPrompt() {
+  const t = promosTexte();
+
+  if (!t) return "- Promotions : aucune promotion en cours. N'en invente jamais.";
+
+  return (
+    "- Promotions en cours (le système les applique tout seul dans le récapitulatif quand le panier contient assez de plats concernés ; ne calcule jamais de prix toi-même, n'invente aucune promotion ; si le client demande les promotions, présente-les en citant les plats par leur nom) :\n" +
+    t.replace(/^🎁 \*Promotions\*\n/, "")
+  );
+}
+
+function etiquette(i) {
+  let n = i;
+  let out = "";
+  do {
+    out = String.fromCharCode(65 + (n % 26)) + out;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+  return out;
 }
 
 function prixF(n) {
@@ -121,50 +207,36 @@ function prixF(n) {
 }
 
 function prixTexte(p) {
-  return (p.des ? "Dès " : "") + prixF(p.prix);
+  return prixF(p.prix);
 }
 
-// Menu pour l'IA : numéro ➜ prix - plat
+function numeroPlat(i) {
+  return String(i + 1).padStart(2, "0");
+}
+
+// Menu pour l'IA : lettre interne (jamais montrée au client)
 function menuLignes() {
-  let cat = null;
-  let out = "";
-
-  PLATS.forEach(p => {
-    if (p.categorie !== cat) {
-      cat = p.categorie;
-      out += `\n*${cat}*\n`;
-    }
-    out += `*${p.numero}* ➜ ${prixTexte(p)} - ${p.nom}\n`;
-  });
-
-  return out.trim();
+  return PLATS
+    .map((p, i) => `*${p.lettre}* (n°${numeroPlat(i)}) ➜ ${prixTexte(p)} - ${p.nom}`)
+    .join("\n");
 }
 
-// Menu montré aux clients : liste numérotée, le client peut écrire le numéro ou le nom
+// Menu montré aux clients : liste à puces, le client écrit librement ce qu'il veut
 function menuLignesClient() {
-  let cat = null;
-  let out = "";
-
-  PLATS.forEach(p => {
-    if (p.categorie !== cat) {
-      cat = p.categorie;
-      out += `\n*${cat}*\n`;
-    }
-    out += `${p.numero}. ${p.nom} : ${prixTexte(p)}\n`;
-  });
-
-  return out.trim();
+  return PLATS
+    .map((p, i) => `*${numeroPlat(i)}*  ${p.nom} ➜ *${prixTexte(p)}*`)
+    .join("\n");
 }
 
 function menuBloc() {
   if (!PLATS.length) return "Notre menu est en cours de mise à jour, revenez dans un instant 😊";
 
+  const promos = promosTexte();
+
   return (
     `${menuLignesClient()}\n\n` +
-    `👉 Pour commander, écrivez simplement le *numéro* du plat (ex : *3*).\n` +
-    `• Plusieurs plats : *2 et 5*\n` +
-    `• Plusieurs portions : *3 x2* (2 fois le plat n°3)\n` +
-    `Vous pouvez aussi écrire le nom du plat 😊`
+    (promos ? `${promos}\n\n` : "") +
+    `Écrivez-moi le nom ou le numéro du plat, vous pouvez prendre plusieurs plats en un seul message 😊`
   );
 }
 
@@ -181,39 +253,8 @@ function menuTexte(nomClient) {
       ? `${salutation()} ${nomClient} 👋\nContent de vous revoir chez Groupe Express 🍽️\n\n`
       : `${salutation()} 👋\nBienvenue chez Groupe Express 🍽️\n\n`) +
     `Voici ce que nous proposons :\n\n` +
-    menuBloc() +
-    `\n\n${avisRetrait()}`
+    menuBloc()
   );
-}
-
-// ===============================
-// DATES ET RETRAIT (avant 11h : aujourd'hui 12h ; à partir de 11h : demain 12h)
-// ===============================
-
-function dateJour() {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: FUSEAU }).format(new Date());
-}
-
-// Abidjan est en UTC toute l'année (pas d'heure d'été) : +24h = demain
-function dateDemain() {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: FUSEAU }).format(new Date(Date.now() + 24 * 3600 * 1000));
-}
-
-// Jour où la commande passée MAINTENANT sera récupérée
-function dateRetrait() {
-  return apresLimite() ? dateDemain() : dateJour();
-}
-
-// "aujourd'hui à 12h00" ou "demain à 12h00" pour un jour de retrait donné
-function quandRetrait(jourRetrait) {
-  return (jourRetrait && jourRetrait > dateJour() ? "demain" : "aujourd'hui") + ` à ${HEURE_RAPPEL_TEXTE}`;
-}
-
-// Phrase d'information selon l'heure actuelle
-function avisRetrait() {
-  return apresLimite()
-    ? `⏰ Il est passé ${HEURE_LIMITE}h : les commandes passées maintenant sont à récupérer *demain à ${HEURE_RAPPEL_TEXTE}*.`
-    : `📅 Les commandes passées avant ${HEURE_LIMITE}h sont à récupérer *aujourd'hui à ${HEURE_RAPPEL_TEXTE}* (après ${HEURE_LIMITE}h : demain à ${HEURE_RAPPEL_TEXTE}).`;
 }
 
 // ===============================
@@ -226,6 +267,10 @@ function normaliser(texte) {
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .trim();
+}
+
+function dateJour() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: FUSEAU }).format(new Date());
 }
 
 const MOTS_VIDES_PLAT = [
@@ -302,6 +347,13 @@ function scorePlat(requete, nomPlat) {
 function trouverPlat(texte) {
   const t = normaliser(texte);
 
+  // Numéro du plat tel qu'affiché dans le menu : "5", "05", "n°5", "numero 12"
+  const num = t.match(/^(?:n°|no|num|numero|n)?\s*0*(\d{1,2})$/);
+  if (num) {
+    const i = Number(num[1]);
+    return i >= 1 && i <= PLATS.length ? PLATS[i - 1] : null;
+  }
+
   if (t.length >= 4 && t.length <= 40) {
     const trouves = PLATS.filter(p => {
       const n = normaliser(p.nom);
@@ -326,158 +378,11 @@ function trouverPlat(texte) {
   return null;
 }
 
-// Retrouve un plat à partir de ce que renvoie l'IA : numéro ("5") ou, à défaut, nom
+// Retrouve un plat à partir de ce que renvoie l'IA : lettre ("B") ou, à défaut, nom
 function platDepuisRef(ref) {
   const r = String(ref || "").trim();
   if (!r) return null;
-
-  const num = r.replace(/^(n°|n\s?°|no|num|numero)\s*/i, "").replace(/[.\s]+$/, "");
-  if (/^\d{1,3}$/.test(num)) {
-    const p = PLATS.find(x => x.numero === Number(num));
-    if (p) return p;
-  }
-
-  return trouverPlat(r);
-}
-
-// ===============================
-// COMMANDE PAR NUMÉROS ("3", "2 et 5", "3 x2", "je veux le 4", "n°7")
-// ===============================
-
-// Retourne une liste [{ numero, quantite }] si le message ne contient que des numéros de plats
-// (avec éventuellement "x quantité"), sinon null. Un numéro de téléphone n'est jamais pris pour un numéro de plat.
-function lireNumeros(texte) {
-  let t = normaliser(texte);
-
-  if (!t || /\d{4,}/.test(t)) return null; // numéro de téléphone ou nombre trop long
-
-  t = t
-    .replace(/n\s?°/g, " ")
-    .replace(/\b(numeros?|num|no)\b/g, " ")
-    .replace(/\b(je veux|je voudrais|je prends?|donne(z)? moi|donne|mets?|ajoute|ajouter|prendre|moi|le|la|les|plats?|et|svp|stp|merci|aussi|encore)\b/g, " ")
-    .replace(/[,;+&.]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!t || !/\d/.test(t) || !/^[\d\sx*×]+$/.test(t)) return null;
-
-  const re = /(\d{1,3})(?:\s*[x*×]\s*(\d{1,2}))?/g;
-  const resultats = [];
-  let m;
-
-  while ((m = re.exec(t)) !== null) {
-    resultats.push({
-      numero: Number(m[1]),
-      quantite: Math.max(1, Number(m[2] || 1))
-    });
-  }
-
-  if (!resultats.length) return null;
-
-  // Il ne doit rester que des séparateurs (un "x" isolé rend le message ambigu)
-  const reste = t.replace(re, "").replace(/\s+/g, "");
-  if (reste) return null;
-
-  return resultats.slice(0, MAX_LIGNES);
-}
-
-// ===============================
-// RECHERCHE DE PLATS LIÉS ("porc", "porc sauter", "je veux porc", "il y a porc ?")
-// ===============================
-
-const MOTS_VIDES_RECHERCHE = [
-  "il", "y", "ya", "as", "avez", "vous", "tu", "est", "ce", "ca", "que", "qui", "quoi",
-  "quel", "quelle", "quels", "quelles", "cest", "qu", "en", "pour", "sur", "vend", "vendez",
-  "avoir", "reste", "dispo", "disponible", "disponibles", "plat", "plats", "menu", "prix",
-  "cmb", "combien", "cherche", "voir", "donne", "donnez", "mon", "ma", "mes", "on", "si",
-  "ou", "pas", "ne", "bonjour", "bonsoir", "salut", "bjr", "bsr", "slt", "merci",
-  "veux", "veut", "voudrais", "voudrait", "prends", "prend", "prendre", "souhaite", "aimerais", "aimerai", "jveux"
-];
-
-function motsRecherche(texte) {
-  return motsPlat(texte).filter(m => m.length >= 3 && !MOTS_VIDES_RECHERCHE.includes(m));
-}
-
-// Tous les plats qui ont un rapport avec le texte (mot du nom ou de la catégorie).
-// Si certains plats correspondent à TOUS les mots, on ne garde qu'eux ; sinon on garde ceux qui en contiennent au moins un.
-function platsLies(texte) {
-  const mots = motsRecherche(texte);
-  if (!mots.length || !PLATS.length) return [];
-
-  const evalues = PLATS.map((p, idx) => {
-    const motsNom = motsPlat(p.nom).concat(motsPlat(p.categorie));
-    let trouves = 0;
-    let score = 0;
-
-    for (const w of mots) {
-      let best = 0;
-      for (const x of motsNom) {
-        const s = scoreMot(w, x);
-        if (s >= 0.8 && s > best) best = s; // exact, début de mot ou petite faute (pas les abréviations trop floues)
-      }
-      if (best > 0) { trouves++; score += best; }
-    }
-
-    return { p, idx, trouves, score };
-  }).filter(x => x.trouves > 0);
-
-  if (!evalues.length) return [];
-
-  const tous = evalues.filter(x => x.trouves === mots.length);
-  const retenus = tous.length ? tous : evalues;
-
-  return retenus.sort((a, b) => a.idx - b.idx).map(x => x.p);
-}
-
-// Sujet de la recherche : uniquement les mots utiles ("je veux porc sauter" -> "porc sauter")
-function sujetRecherche(requete) {
-  const mots = motsRecherche(requete);
-  const sujet = mots.length ? mots.join(" ") : String(requete || "").trim();
-  return sujet.slice(0, 40);
-}
-
-function reponseSuggestions(requete, trouves) {
-  const sujet = sujetRecherche(requete);
-  let cat = null;
-  let corps = "";
-
-  trouves.slice(0, 25).forEach(p => {
-    if (p.categorie !== cat) {
-      cat = p.categorie;
-      corps += `\n*${cat}*\n`;
-    }
-    corps += `${p.numero}. ${p.nom} : ${prixTexte(p)}\n`;
-  });
-
-  const intro = trouves.length === 1
-    ? `Voici le plat concernant « ${sujet} » 😊`
-    : `Voici nos plats concernant « ${sujet} » 😊`;
-
-  return (
-    `${intro}\n${corps.trimEnd()}\n\n` +
-    `Dites-moi le *numéro* du plat que vous voulez (ex : *${trouves[0].numero}*, ou *${trouves[0].numero} x2* pour 2 portions) et je le note tout de suite 🍽️`
-  );
-}
-
-// Envoie une réponse simple sans toucher au panier, en gardant l'état de la conversation
-async function repondreSimple(from, etat, texte, reponse) {
-  etat.hist.push({ r: "c", t: texte }, { r: "b", t: reponse.slice(0, 300) });
-  await ecrireEtat(from, {
-    panier: etat.panier,
-    recap: etat.recap,
-    recapRetrait: etat.recapRetrait,
-    nom: etat.nom,
-    contact: etat.contact,
-    avisAttendu: etat.avisAttendu,
-    hist: etat.hist
-  });
-
-  return reponse;
-}
-
-// Envoie la liste des plats trouvés sans toucher au panier
-async function repondreSuggestions(from, etat, texte, requete, trouves) {
-  return repondreSimple(from, etat, texte, reponseSuggestions(requete, trouves));
+  return PLATS.find(p => p.lettre === r.toUpperCase()) || trouverPlat(r);
 }
 
 // Numéro ivoirien : 10 chiffres (ex. 0172369740), avec ou sans +225 / 00225, espaces, points ou tirets
@@ -641,8 +546,52 @@ function detaillerPanier(panier) {
   return lignes;
 }
 
-function totalPanier(lignes) {
+function totalBrut(lignes) {
   return lignes.reduce((s, l) => s + Number(l.plat.prix || 0) * l.qte, 0);
+}
+
+// Pour chaque promotion : par lot de N plats concernés, le lot coûte le prix promo.
+// Les plats les moins chers sont regroupés en premier, et un plat n'est compté que dans une seule promotion.
+function calculerPromos(lignes) {
+  const reste = lignes.map(l => l.qte);
+  const details = [];
+  let remise = 0;
+
+  for (const promo of PROMOS) {
+    const unites = [];
+
+    lignes.forEach((l, i) => {
+      if (!promo.platIds.includes(l.plat.id)) return;
+      for (let k = 0; k < reste[i]; k++) unites.push({ i, prix: Number(l.plat.prix) || 0 });
+    });
+
+    const groupes = Math.floor(unites.length / promo.quantite);
+    if (!groupes) continue;
+
+    unites.sort((a, b) => a.prix - b.prix);
+    const prises = unites.slice(0, groupes * promo.quantite);
+    const normal = prises.reduce((s, u) => s + u.prix, 0);
+    const gain = normal - groupes * promo.prix;
+
+    if (gain <= 0) continue; // la promotion ne ferait pas baisser le prix
+
+    prises.forEach(u => { reste[u.i]--; });
+    remise += gain;
+    details.push({ titre: promo.titre || `${promo.quantite} plats`, groupes, gain });
+  }
+
+  return { remise, details };
+}
+
+function totalPanier(lignes) {
+  return totalBrut(lignes) - calculerPromos(lignes).remise;
+}
+
+// Lignes "🎁 promo : -1 000 F" montrées dans le récapitulatif et la validation
+function promoLignesTexte(lignes) {
+  return calculerPromos(lignes).details
+    .map(d => `🎁 ${d.titre}${d.groupes > 1 ? " × " + d.groupes : ""} : -${prixF(d.gain)}`)
+    .join("\n");
 }
 
 function ligneTexte(l) {
@@ -650,19 +599,18 @@ function ligneTexte(l) {
 }
 
 function totalTexte(lignes) {
-  const des = lignes.some(l => l.plat.des);
-  return (des ? "à partir de " : "") + prixF(totalPanier(lignes));
+  return prixF(totalPanier(lignes));
 }
 
 function recapTexte(lignes) {
   const corps = lignes
-    .map(l => `🍽️ ${ligneTexte(l)} — ${l.plat.des ? "dès " : ""}${prixF(Number(l.plat.prix) * l.qte)}`)
+    .map(l => `🍽️ ${ligneTexte(l)} — ${prixF(Number(l.plat.prix) * l.qte)}`)
     .join("\n");
 
-  return (
-    `Voici votre panier :\n\n${corps}\n\n💰 Total : ${totalTexte(lignes)}\n` +
-    `📅 Retrait : ${quandRetrait(dateRetrait())}`
-  );
+  const promos = promoLignesTexte(lignes);
+  const bloc = promos ? corps + "\n" + promos : corps;
+
+  return `Voici votre panier :\n\n${bloc}\n\n💰 Total : ${totalTexte(lignes)}`;
 }
 
 // Récapitulatif + ce qu'il manque, ou demande de confirmation si tout est là
@@ -695,7 +643,7 @@ function recapEtSuite(lignes, nom, contact) {
 // ===============================
 
 async function lireEtat(from) {
-  const vide = { panier: [], recap: false, recapRetrait: null, nom: null, contact: null, avisAttendu: false, hist: [], maj: 0 };
+  const vide = { panier: [], recap: false, nom: null, contact: null, avisAttendu: false, hist: [], maj: 0 };
 
   const doc = await firestore.collection("conversations").doc(from).get();
 
@@ -708,7 +656,6 @@ async function lireEtat(from) {
   return {
     panier: Array.isArray(d.panier) ? d.panier.map(l => ({ ...l })) : [],
     recap: !!d.recap,
-    recapRetrait: d.recapRetrait || null,
     nom: d.nom || null,
     contact: d.contact || null,
     avisAttendu: !!d.avisAttendu,
@@ -721,7 +668,6 @@ async function ecrireEtat(from, etat) {
   await firestore.collection("conversations").doc(from).set({
     panier: Array.isArray(etat.panier) ? etat.panier : [],
     recap: !!etat.recap,
-    recapRetrait: etat.recap ? (etat.recapRetrait || null) : null,
     nom: etat.nom || null,
     contact: etat.contact || null,
     avisAttendu: !!etat.avisAttendu,
@@ -730,37 +676,20 @@ async function ecrireEtat(from, etat) {
   });
 }
 
-// Commandes du client : passées aujourd'hui OU à récupérer aujourd'hui
-// (une commande passée hier après 11h est à récupérer aujourd'hui ; une commande passée
-// aujourd'hui après 11h est à récupérer demain : les deux doivent rester visibles)
 async function commandesDuJour(from) {
   try {
-    const jour = dateJour();
+    const snapshot = await firestore
+      .collection("commandes")
+      .where("chatId", "==", from)
+      .where("jour", "==", dateJour())
+      .get();
 
-    const [passees, aRetirer] = await Promise.all([
-      firestore.collection("commandes").where("chatId", "==", from).where("jour", "==", jour).get(),
-      firestore.collection("commandes").where("chatId", "==", from).where("jourRetrait", "==", jour).get()
-    ]);
-
-    const vues = new Set();
     const liste = [];
 
-    const ajouter = doc => {
-      if (vues.has(doc.id)) return;
-      vues.add(doc.id);
+    snapshot.forEach(doc => {
       const c = doc.data();
-      liste.push({
-        code: c.code || doc.id,
-        plat: c.plat,
-        statut: c.statut,
-        nom: c.nom,
-        total: c.total || c.prix || 0,
-        jourRetrait: c.jourRetrait || c.jour || jour
-      });
-    };
-
-    passees.forEach(ajouter);
-    aRetirer.forEach(ajouter);
+      liste.push({ code: c.code || doc.id, plat: c.plat, statut: c.statut, nom: c.nom, total: c.total || c.prix || 0 });
+    });
 
     return liste;
   } catch (error) {
@@ -862,10 +791,6 @@ async function enregistrerCommande(chatId, lignes, nom, contact, messageId = nul
   const resume = lignes.map(ligneTexte).join(", ");
   const premier = lignes[0].plat;
 
-  // Fixé une seule fois pour toute la commande (jour de commande et jour de retrait)
-  const jour = dateJour();
-  const jourRetrait = dateRetrait();
-
   for (let essai = 0; essai < 5; essai++) {
     const code = genererCode();
 
@@ -887,18 +812,19 @@ async function enregistrerCommande(chatId, lignes, nom, contact, messageId = nul
         prix: total,
         total: total,
         aPartirDe: lignes.some(l => l.plat.des),
+        remise: calculerPromos(lignes).remise,
+        promos: calculerPromos(lignes).details.map(d => `${d.titre}${d.groupes > 1 ? " × " + d.groupes : ""}`),
         source: source,
         messageId: messageId,
         nom: nom,
         contact: contact,
-        jour: jour,                // jour où la commande a été passée
-        jourRetrait: jourRetrait,  // jour où elle sera récupérée (12h00)
+        jour: dateJour(),
         date: new Date().toISOString(),
         statut: "en_attente",
         ...(express.actif ? { fournisseurEnvoi: "a_envoyer" } : {})
       });
 
-      return { code, jourRetrait };
+      return code;
     } catch (error) {
       if (error.code === 6 || /ALREADY_EXISTS/.test(error.message)) {
         continue;
@@ -994,17 +920,16 @@ const SCHEMA_REPONSE = {
     montrer_menu: { type: "BOOLEAN" },
     a_transmettre: { type: "STRING", nullable: true },
     avis: { type: "STRING", nullable: true },
-    recherche: { type: "STRING", nullable: true },
     image: { type: "STRING", nullable: true }
   },
   required: ["reponse"]
 };
 
-function libelleStatut(statut, jourRetrait) {
+function libelleStatut(statut) {
   if (statut === "rappel_envoye") {
     return "prête, le client a été prévenu de venir la récupérer";
   }
-  return `enregistrée, en préparation (à récupérer ${quandRetrait(jourRetrait)} ; un message de retrait est envoyé à ${HEURE_RAPPEL_TEXTE})`;
+  return `enregistrée, en préparation (message de retrait envoyé à ${HEURE_RAPPEL_TEXTE})`;
 }
 
 function construirePrompt(texte, etat, commandes, profil, nomWhatsApp) {
@@ -1025,13 +950,9 @@ function construirePrompt(texte, etat, commandes, profil, nomWhatsApp) {
 
   const deja = commandes.length
     ? commandes
-        .map(c => `- ${c.code} : ${c.plat}, total ${prixF(c.total)} (${libelleStatut(c.statut, c.jourRetrait)})`)
+        .map(c => `- ${c.code} : ${c.plat}, total ${prixF(c.total)} (${libelleStatut(c.statut)})`)
         .join("\n")
     : "Aucune commande aujourd'hui.";
-
-  const retraitMaintenant = apresLimite()
-    ? `Il est passé ${HEURE_LIMITE}h : toute commande passée maintenant sera à récupérer DEMAIN à ${HEURE_RAPPEL_TEXTE}.`
-    : `Il est avant ${HEURE_LIMITE}h : toute commande passée maintenant sera à récupérer AUJOURD'HUI à ${HEURE_RAPPEL_TEXTE}.`;
 
   return `
 Tu es l'assistant WhatsApp de Groupe Express, un service de vente de repas à emporter (retrait sur place) en Côte d'Ivoire.
@@ -1039,17 +960,18 @@ Tu discutes comme un vrai vendeur sympathique : naturel, chaleureux, serviable, 
 Tu écris comme une personne de l'équipe qui répond sur WhatsApp : messages courts et naturels, comme dans une conversation entre deux personnes, sans formules toutes faites et sans te présenter toi-même comme un robot, une IA ou un assistant virtuel. Tu peux dire « l'équipe Groupe Express ». En revanche, si le client te demande sincèrement s'il parle à une personne ou à un robot, ne le nie JAMAIS : réponds simplement et honnêtement que tu es l'assistant virtuel de Groupe Express, puis propose de continuer à l'aider ou de transmettre sa demande à l'équipe.
 
 CE QUE TU SAIS (et rien de plus) :
-- Menu (numéro ➜ prix - plat) :
+- Menu (lettre ➜ prix - plat) :
 ${menuLignes()}
-- Le menu est montré au client en liste NUMÉROTÉE : il peut commander en écrivant le numéro du plat (ex : "3", "2 et 5", "3 x2" = 2 fois le plat n°3) ou en écrivant le nom du plat avec ses propres mots (même mal écrit). Dans les champs "plat", mets toujours le NUMÉRO du plat (en texte, ex : "3"). Tu peux citer les numéros au client quand c'est utile, avec le nom du plat.
-- Le client peut commander plusieurs plats avec des quantités dans un seul message. Il donne aussi son nom et son numéro de téléphone (un seul nom suffit).
+- Les lettres servent UNIQUEMENT à remplir les champs "plat". Ne les écris jamais au client : parle toujours des plats par leur nom. Le menu est montré au client en liste à puces, sans numéros : il écrit librement ce qu'il veut avec ses propres mots ; retrouve chaque plat par son nom (même mal écrit). Le client peut aussi donner le numéro du plat affiché dans le menu (ex : "5", "n°05", "2 fois le 12") : retrouve-le grâce à (n°XX) dans la liste ci-dessus ; "2 du 12" veut dire 2 plats n°12.
+- Le client peut commander plusieurs plats avec des quantités dans un seul message, en écrivant librement. Il donne aussi son nom et son numéro de téléphone (un seul nom suffit).
 - Quand la commande est validée, le client reçoit un code de livraison (GE-XXXX) à présenter à la remise, puis le système lui demande son avis sur Groupe Express.
-- Les commandes sont prises à toute heure. Règle de retrait : une commande passée AVANT ${HEURE_LIMITE}h00 (heure d'Abidjan) est à récupérer le JOUR MÊME à ${HEURE_RAPPEL_TEXTE} ; une commande passée à partir de ${HEURE_LIMITE}h00 est à récupérer LE LENDEMAIN à ${HEURE_RAPPEL_TEXTE}. ${retraitMaintenant} Ne dis jamais que les commandes sont fermées.
-- Les plats se récupèrent sur place : à ${HEURE_RAPPEL_TEXTE} le jour du retrait, un message prévient les clients de venir récupérer leurs plats.
+- Les commandes sont prises de ${HEURE_REOUVERTURE}h00 à ${HEURE_FERMETURE}h00 (heure d'Abidjan), fermées entre ${HEURE_FERMETURE}h00 et ${HEURE_REOUVERTURE}h00.
+- Les plats se récupèrent sur place : à ${HEURE_RAPPEL_TEXTE}, un message prévient les clients de venir récupérer leurs plats.
 - Service client (téléphone) : ${SERVICES_TXT}. Ce sont LES numéros à donner quand le client a un souci, une demande, ou parle d'autre chose que commander un repas. Donne-les tels quels, ne les modifie jamais et n'invente aucun autre numéro.
 - Paiement : uniquement en espèces, au stand Groupe Express, à la livraison de la commande.
+${promosPrompt()}
 - Les clients doivent écrire en texte : les vocaux, images et fichiers ne sont pas lus. Si le client dit avoir envoyé un vocal, demande-lui d'écrire son message.
-- Tu ne connais PAS : l'adresse exacte, les horaires d'ouverture du stand, les tarifs de livraison, la composition ou la taille des plats, les promotions, les délais précis, ni les boissons si elles ne sont pas au menu. Ne les invente JAMAIS.
+- Tu ne connais PAS : l'adresse exacte, les horaires d'ouverture, les tarifs de livraison, la composition ou la taille des plats, les promotions, les délais précis, ni les boissons si elles ne sont pas au menu. Ne les invente JAMAIS.
 
 À PROPOS DE GROUPE EXPRESS (tu peux en parler en détail, avec tes propres mots, quand on te le demande) :
 GROUPE EXPRESS est une entreprise dynamique spécialisée dans la distribution de repas universitaires. Sa mission : fournir aux étudiants et au personnel académique des repas de qualité, savoureux et équilibrés, à des prix très accessibles. Fondée avec la vision de lutter contre la malnutrition et d'améliorer les conditions de vie des étudiants dans les universités, elle propose une large gamme de plats traditionnels et modernes adaptés aux goûts et aux besoins des jeunes. Présente dans plusieurs établissements universitaires, elle se distingue par :
@@ -1069,10 +991,9 @@ COMPRENDRE LES CLIENTS :
 - Si tu ne comprends vraiment pas la demande, ou si tu ne peux pas y répondre, ne dis JAMAIS que tu es perdu ou que tu ne comprends pas : invite simplement le client à contacter le service client au ${SERVICES_TXT}.
 - Tu réponds uniquement au message que le client vient d'envoyer. Tu n'écris jamais de ton initiative et tu ne promets jamais d'écrire plus tard, sauf le message de retrait envoyé par le système à ${HEURE_RAPPEL_TEXTE}.
 - Reconnais les plats malgré les fautes (attiéké/atieke, tchèpe/tchep, spag/spaghetti, garba...).
-- NUMÉROS : un numéro précédé de "le", "du", "n°" ou "numéro" (ex : "le 5", "2 du 5", "n°3") désigne le plat portant ce numéro dans le menu ci-dessus ("2 du 5" = 2 portions du plat n°5). Un nombre suivi d'un NOM de plat (ex : "2 garba") est une quantité. Un message composé uniquement de numéros est normalement géré par le système ; s'il t'arrive quand même, un numéro seul = le plat portant ce numéro (quantité 1), et "N x Q" = plat N en quantité Q. Si un numéro ne correspond à aucun plat du menu, dis-le gentiment et propose le menu. Si c'est vraiment ambigu, pose UNE question courte.
-- Le client n'écrit presque jamais le nom exact du menu : il raccourcit, tronque les mots, ne garde que le début ou les initiales (ex : "sau gra" = Sauce graine, "atk poisson" = Attiéké poisson, "poul brais" = poulet braisé). Cherche toujours le plat du menu qui correspond le mieux, même si le nom est incomplet ou déformé, et mets son numéro dans "plat". Ne demande JAMAIS au client d'écrire le nom exact. Si UN SEUL plat est plausible, prends-le directement. Si DEUX plats ou plus sont plausibles (ex : "sauce" alors qu'il y a plusieurs sauces), pose UNE question courte en citant ces plats par leur numéro et leur nom, sans modifier le panier.
+- Le client n'écrit presque jamais le nom exact du menu : il raccourcit, tronque les mots, ne garde que le début ou les initiales (ex : "sau gra" = Sauce graine, "atk poisson" = Attiéké poisson, "poul brais" = poulet braisé). Cherche toujours le plat du menu qui correspond le mieux, même si le nom est incomplet ou déformé, et mets sa lettre dans "plat". Ne demande JAMAIS au client d'écrire le nom exact. Si UN SEUL plat est plausible, prends-le directement. Si DEUX plats ou plus sont plausibles (ex : "sauce" alors qu'il y a plusieurs sauces), pose UNE question courte en citant ces plats par leur nom, sans modifier le panier.
 - Si le client donne son avis, un compliment ou une critique sur les plats ou le service, copie-le fidèlement (court) dans "avis" et remercie-le chaleureusement. Ne mets dans "avis" que de vrais avis, jamais une question ni une commande.
-- Si le client parle d'un plat qui n'est pas au menu ET qu'aucun plat du menu ne lui ressemble, dis-le gentiment (dans "reponse") et propose le menu. Ne prétends pas qu'il existe.
+- Si le client parle d'un plat qui n'est pas au menu, dis-le gentiment (dans "reponse") et propose le menu. Ne prétends pas qu'il existe.
 - Réponds dans la langue du client (français par défaut), avec des mots simples. Vouvoie par défaut, tutoie si le client tutoie.
 - Réponses courtes (2 à 5 lignes) pour les échanges normaux. MAIS si le client demande ce qu'est Groupe Express, sa mission, son histoire ou ses valeurs, réponds en détail (une présentation complète et chaleureuse, avec les points forts en liste et des emojis). Si le client te pose une question générale, réponds-lui utilement et naturellement, sans tout ramener à la commande ; propose le menu seulement quand c'est pertinent.
 - Tu es vif, malin et nuancé : tu relies les informations, tu anticipes ce que le client veut vraiment.
@@ -1082,23 +1003,19 @@ COMPRENDRE LES CLIENTS :
 - DEMANDES : toute demande, question ou requête que tu ne peux pas traiter toi-même (modification ou annulation d'une commande validée, réclamation, information que tu ne connais pas, parler à un responsable) doit être redirigée vers le service client : dis-lui d'appeler le ${SERVICES_TXT}. Donne ce numéro tel quel.
 - HORS SUJET : si le client parle d'autre chose que les repas de Groupe Express, réponds brièvement et poliment, puis ramène la conversation vers les repas et donne-lui le numéro du service client ${SERVICES_TXT} s'il souhaite parler à une personne.
 
-RECHERCHE DE PLATS (très important) :
-- Si le client demande un type de plat, un ingrédient ou un plat qui n'est pas exactement au menu mais qui y ressemble (ex : "porc", "je veux porc", "poisson", "il y a porc ?", "porc sauter", "porc au four", "vous avez du poulet ?", "pâtes"), mets UNIQUEMENT le ou les mots-clés du plat dans "recherche" (ex : "porc", "porc sauter" ; jamais "je veux porc", sans verbe ni formule de politesse), laisse "reponse" vide et ne touche pas au panier. Le système affiche lui-même tous les plats du menu qui correspondent, avec leurs numéros.
-- Ne redirige JAMAIS vers le service client pour ce genre de demande, et ne dis pas qu'un plat n'existe pas avant que le système ait présenté ce qui y ressemble.
-
 COMMENT TU GÈRES LE PANIER :
-- Le panier actuel est affiché dans ÉTAT ACTUEL. Dans "articles_ajouter", mets UNIQUEMENT les plats nouveaux demandés dans CE message : une entrée par plat avec "plat" (le numéro), "quantite" (entier, 1 si non précisé) et "precision" (ex : "sans piment", sinon null). Ne répète jamais des plats déjà dans le panier.
-- Pour retirer ou diminuer : "articles_retirer" avec "plat" (le numéro) et "quantite" (null = retirer tout ce plat). Pour remplacer un plat par un autre : retire l'ancien ET ajoute le nouveau.
+- Le panier actuel est affiché dans ÉTAT ACTUEL. Dans "articles_ajouter", mets UNIQUEMENT les plats nouveaux demandés dans CE message : une entrée par plat avec "plat" (la lettre), "quantite" (entier, 1 si non précisé) et "precision" (ex : "sans piment", sinon null). Ne répète jamais des plats déjà dans le panier.
+- Pour retirer ou diminuer : "articles_retirer" avec "plat" et "quantite" (null = retirer tout ce plat). Pour remplacer un plat par un autre : retire l'ancien ET ajoute le nouveau.
 - Une seule commande peut contenir PLUSIEURS plats différents. Un client peut commander 2, 4, 6 plats ou plus dans un seul message ou en plusieurs messages : remplis une entrée par plat dans "articles_ajouter", ils vont tous dans le même panier. Tu ne fais que transmettre les plats et quantités : le système calcule la facture et enregistre la commande.
 - Si le client demande seulement une info sur un plat, ne touche pas au panier.
-- Quand tu modifies le panier, "reponse" doit être au plus UNE courte phrase (par exemple pour signaler un plat absent du menu) ou vide : le système affiche lui-même le récapitulatif, le total et le jour de retrait. Ne calcule JAMAIS de total, ne recopie pas le panier.
-- Il faut aussi un nom et un numéro de téléphone. Un seul nom OU prénom suffit. Remplis "nom" et "contact" uniquement avec ce que le client a réellement écrit, n'invente jamais. Ne les redemande jamais s'ils sont déjà dans ÉTAT ACTUEL. Un numéro de Côte d'Ivoire a 10 chiffres (ex. 0172369740), parfois écrit avec espaces, points, tirets ou +225. S'il n'a pas 10 chiffres, laisse contact vide et redemande poliment un numéro à 10 chiffres. Attention : un numéro à 10 chiffres est un téléphone, jamais un numéro de plat.
+- Quand tu modifies le panier, "reponse" doit être au plus UNE courte phrase (par exemple pour signaler un plat absent du menu) ou vide : le système affiche lui-même le récapitulatif et le total. Ne calcule JAMAIS de total, ne recopie pas le panier.
+- Il faut aussi un nom et un numéro de téléphone. Un seul nom OU prénom suffit. Remplis "nom" et "contact" uniquement avec ce que le client a réellement écrit, n'invente jamais. Ne les redemande jamais s'ils sont déjà dans ÉTAT ACTUEL. Un numéro de Côte d'Ivoire a 10 chiffres (ex. 0172369740), parfois écrit avec espaces, points, tirets ou +225. S'il n'a pas 10 chiffres, laisse contact vide et redemande poliment un numéro à 10 chiffres.
 - Si le client donne le nom et le numéro d'un coup (ex : "madani 0567890612"), prends les deux. Si le client donne plat, quantités, nom et numéro dans un même message, remplis tout d'un coup.
-- Si le client hésite ou demande conseil, recommande 1 ou 2 plats du menu avec leur numéro et leur prix.
+- Si le client hésite ou demande conseil, recommande 1 ou 2 plats du menu avec leur prix.
 - Ne dis JAMAIS que la commande est enregistrée ou validée et n'invente JAMAIS de code : le système le fait seulement après la confirmation du client. Mets "confirmer" à true uniquement si le client confirme clairement le récapitulatif déjà montré, sans rien modifier dans ce même message.
 - Si le client veut annuler ou recommencer sa saisie en cours, mets "annuler" à true.
 - Les commandes déjà validées (liste ci-dessous) sont distinctes du panier : si le client veut commander "encore" quelque chose après une commande validée, c'est une NOUVELLE commande avec son propre code. Si ce n'est pas clair, demande-lui simplement s'il veut une nouvelle commande.
-- Si le client demande où en est sa commande ou son code, appuie-toi uniquement sur la liste "Commandes du client" ci-dessous, en précisant quand elle sera à récupérer (aujourd'hui ou demain à ${HEURE_RAPPEL_TEXTE}). Tu ne parles que des commandes de CE client.
+- Si le client demande où en est sa commande ou son code, appuie-toi uniquement sur la liste "Commandes du client aujourd'hui" ci-dessous. Tu ne parles que des commandes de CE client.
 - Si le client demande une chose que tu ne sais pas, ou veut modifier/annuler une commande déjà validée, ou fait une réclamation, ou veut parler à un responsable : explique simplement que tu n'as pas l'information, et mets dans "a_transmettre" un résumé court de sa demande. Le système préviendra l'équipe : ne le dis pas toi-même. Dans "reponse", invite-le toujours à appeler le service client au ${SERVICES_TXT}.
 - Si tu dois montrer le menu (premier message, demande de menu/plats/prix), mets "montrer_menu" à true et fais seulement une courte phrase d'accueil : le système ajoute la liste lui-même, ne la recopie pas.
 - Si le client demande qui a conçu/créé/développé ce programme ou ce chatbot : mets "image" à "createur" et dans "reponse" présente ZINZINDOHOUE MARCIO JARDEL (le texte sera envoyé avec sa photo).
@@ -1112,7 +1029,7 @@ ${profil ? `CLIENT DÉJÀ CONNU : ${profil.nom}, ${profil.contact}. Ces informat
 ${panierTxt}
 ${etat.avisAttendu ? "Le système vient de demander au client son avis sur Groupe Express. S'il répond par un avis, même court (\"très bon\", \"bof\", \"c'était bien\"), mets-le dans avis et remercie-le chaleureusement." : ""}
 
-Commandes du client (passées aujourd'hui ou à récupérer aujourd'hui) :
+Commandes du client aujourd'hui :
 ${deja}
 
 Conversation récente :
@@ -1121,11 +1038,11 @@ ${historique}
 Nouveau message du client :
 """${texte}"""
 
-Réponds uniquement avec un objet JSON ayant les champs : reponse (texte pour le client), articles_ajouter, articles_retirer, confirmer, nom, contact, annuler, montrer_menu, a_transmettre, avis, recherche, image. Mets null (ou false) pour ce qui ne s'applique pas.
+Réponds uniquement avec un objet JSON ayant les champs : reponse (texte pour le client), articles_ajouter, articles_retirer, confirmer, nom, contact, annuler, montrer_menu, a_transmettre, avis, image. Mets null (ou false) pour ce qui ne s'applique pas.
 `;
 }
 
-async function appelGemini(prompt, avecSchema, modele) {
+async function appelGemini(prompt, avecSchema) {
   const apiKey = await getGeminiKey();
 
   if (!apiKey) {
@@ -1141,7 +1058,7 @@ async function appelGemini(prompt, avecSchema, modele) {
   if (avecSchema) generationConfig.responseSchema = SCHEMA_REPONSE;
 
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${modele}:generateContent`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
     {
       method: "POST",
       headers: {
@@ -1195,29 +1112,13 @@ function lireDecision(texte) {
   return objet;
 }
 
-// Essaie un modèle avec le schéma, puis sans schéma si le schéma est refusé (erreur 400)
-async function essayerModele(prompt, modele) {
-  try {
-    return await appelGemini(prompt, true, modele);
-  } catch (error) {
-    if (error.status === 400) {
-      return await appelGemini(prompt, false, modele);
-    }
-    throw error;
-  }
-}
-
-// Modèle principal, puis modèle de secours (plus rapide) s'il échoue ou dépasse le délai
 async function demanderGemini(prompt) {
   try {
-    return await essayerModele(prompt, GEMINI_MODEL);
+    return await appelGemini(prompt, true);
   } catch (error) {
-    console.error(`Gemini (${GEMINI_MODEL}) en échec :`, error.message);
-
-    if (GEMINI_MODEL_SECOURS && GEMINI_MODEL_SECOURS !== GEMINI_MODEL) {
-      return await essayerModele(prompt, GEMINI_MODEL_SECOURS);
+    if (error.status === 400) {
+      return await appelGemini(prompt, false);
     }
-
     throw error;
   }
 }
@@ -1241,13 +1142,7 @@ function decisionSecours(texte, etat) {
   const plat = trouverPlat(nomPlat);
 
   if (plat) {
-    return { articles_ajouter: [{ plat: String(plat.numero), quantite: quantite || 1 }], reponse: null };
-  }
-
-  // Mot-clé ("porc", "je veux porc", "porc sauter"...) : on présente tous les plats liés
-  const lies = platsLies(texte);
-  if (lies.length) {
-    return { reponse: reponseSuggestions(texte, lies) };
+    return { articles_ajouter: [{ plat: plat.lettre, quantite: quantite || 1 }], reponse: null };
   }
 
   if (etat.panier.length) {
@@ -1284,13 +1179,11 @@ function reponseSuspecte(texte, commandes) {
   return false;
 }
 
-// État des commandes, construit uniquement à partir de la base
+// État des commandes du jour, construit uniquement à partir de la base
 function statutCommandes(commandes) {
   return (
-    "Voici vos commandes 📦\n\n" +
-    commandes
-      .map(c => `🔑 ${c.code} : ${c.plat} (${prixF(c.total)}) — ${libelleStatut(c.statut, c.jourRetrait)}`)
-      .join("\n")
+    "Voici vos commandes d'aujourd'hui 📦\n\n" +
+    commandes.map(c => `🔑 ${c.code} : ${c.plat} (${prixF(c.total)}) — ${libelleStatut(c.statut)}`).join("\n")
   );
 }
 
@@ -1349,37 +1242,22 @@ async function traiterMessage(from, texteBrut, meta = {}) {
     return oubli;
   }
 
-  // Plus de fermeture : les commandes sont prises 24h/24.
-  // Avant 11h -> retrait aujourd'hui à 12h ; à partir de 11h -> retrait demain à 12h.
+  // Commandes fermées de 11h à 17h (heure d'Abidjan)
+  if (commandesFermees()) {
+    const ferme =
+      `${salutation()} 👋 Les commandes sont fermées pour le moment ⏰\n` +
+      `• Les commandes s'arrêtent à ${HEURE_FERMETURE}h00\n` +
+      `• Elles rouvrent à ${HEURE_REOUVERTURE}h00 (heure d'Abidjan)\n` +
+      `• Retrait des plats : ${HEURE_RAPPEL_TEXTE}\n\n` +
+      `Revenez à partir de ${HEURE_REOUVERTURE}h00 pour commander 😊\n\n` + contactService();
+    etat.hist.push({ r: "c", t: texte }, { r: "b", t: "Commandes fermées" });
+    await ecrireEtat(from, { panier: [], recap: false, nom: etat.nom, contact: etat.contact, avisAttendu: etat.avisAttendu, hist: etat.hist });
+    return ferme;
+  }
 
   if (profil) {
     etat.nom = etat.nom || profil.nom;
     etat.contact = etat.contact || profil.contact;
-  }
-
-  // Commande par numéros ("3", "2 et 5", "3 x2") : lue directement par le code, sans IA
-  const numeros = !etat.avisAttendu ? lireNumeros(texte) : null;
-
-  if (numeros) {
-    const hors = numeros.filter(x => x.numero < 1 || x.numero > PLATS.length);
-
-    if (hors.length) {
-      const liste = [...new Set(hors.map(x => x.numero))].join(", ");
-      const rep = PLATS.length
-        ? `Le numéro ${liste} n'existe pas dans notre menu 😊\n\n${menuBloc()}`
-        : menuBloc();
-
-      return await repondreSimple(from, etat, texte, rep);
-    }
-  }
-
-  // Recherche directe : "porc", "je veux porc", "porc sauter", "il y a porc ?" -> on présente tous les plats liés.
-  // Fiable même si Gemini est en panne, et fonctionne aussi au tout premier message.
-  if (!numeros && !/\d/.test(texte) && texte.trim().length <= 60 && !trouverPlat(texte)) {
-    const lies = platsLies(texte);
-    if (lies.length) {
-      return await repondreSuggestions(from, etat, texte, texte, lies);
-    }
   }
 
   const nomWhatsApp = !etat.nom && meta.pushName ? String(meta.pushName).slice(0, 40) : null;
@@ -1390,12 +1268,10 @@ async function traiterMessage(from, texteBrut, meta = {}) {
 
   const pauseLongue = Date.now() - (etat.maj || 0) > PAUSE_LONGUE_MS;
 
-  // Premier message, ou retour après une pause : accueil + menu
-  // (sauf si le client écrit directement un plat ou des numéros de plats)
+  // Premier message, ou retour après une pause : accueil + menu (sauf si le client écrit directement un plat)
   const premierContact =
     (etat.hist.length === 0 || pauseLongue) &&
     etat.panier.length === 0 &&
-    !numeros &&
     !trouverPlat(texte);
 
   // Message court sans question : on accueille directement. Sinon l'IA répond et le menu est ajouté.
@@ -1410,17 +1286,10 @@ async function traiterMessage(from, texteBrut, meta = {}) {
 
   let decision = null;
 
-  if (numeros) {
-    decision = {
-      articles_ajouter: numeros.map(x => ({ plat: String(x.numero), quantite: x.quantite, precision: null })),
-      reponse: null
-    };
-  } else {
-    try {
-      decision = await demanderGemini(construirePrompt(texte, etat, commandes, profil, nomWhatsApp));
-    } catch (error) {
-      console.error("Gemini indisponible :", error.message);
-    }
+  try {
+    decision = await demanderGemini(construirePrompt(texte, etat, commandes, profil, nomWhatsApp));
+  } catch (error) {
+    console.error("Gemini indisponible :", error.message);
   }
 
   let secours = false;
@@ -1431,15 +1300,6 @@ async function traiterMessage(from, texteBrut, meta = {}) {
 
   if (premierContact && !messageSimple) decision.montrer_menu = true;
 
-  // Gemini a identifié une recherche de plats : on présente tous les plats liés, sans toucher au panier
-  const recherche = typeof decision.recherche === "string" ? decision.recherche.trim() : "";
-  if (recherche && decision.confirmer !== true && decision.annuler !== true) {
-    const lies = platsLies(recherche);
-    if (lies.length) {
-      return await repondreSuggestions(from, etat, texte, recherche, lies);
-    }
-  }
-
   const corpusClient = [texte]
     .concat(etat.hist.filter(h => h.r === "c").map(h => h.t))
     .join("\n");
@@ -1449,7 +1309,6 @@ async function traiterMessage(from, texteBrut, meta = {}) {
   let contact = etat.contact;
   let avisAttendu = etat.avisAttendu;
   let recap = etat.recap;
-  let recapRetrait = etat.recapRetrait;
   let reponse;
 
   if (decision.annuler === true) {
@@ -1490,12 +1349,8 @@ async function traiterMessage(from, texteBrut, meta = {}) {
   const lignes = detaillerPanier(panier);
   panier = lignes.map(l => ({ platId: l.plat.id, qte: l.qte, precision: l.precision }));
 
-  // Le jour de retrait a changé depuis le récapitulatif (ex. il était 10h58, il est 11h02) :
-  // le client doit revoir le récapitulatif avec la nouvelle date avant de confirmer
-  const retraitChange = Boolean(etat.recap && etat.recapRetrait && etat.recapRetrait !== dateRetrait());
-
   // Le récapitulatif montré n'est plus valable si quelque chose a changé
-  const modif = modifPanier || nomChange || telChange || retraitChange;
+  const modif = modifPanier || nomChange || telChange;
   if (modif) recap = false;
 
   let commandeValidee = false;
@@ -1503,30 +1358,27 @@ async function traiterMessage(from, texteBrut, meta = {}) {
 
   if (decision.confirmer === true && etat.recap && !modif && lignes.length && nom && contact) {
     // 3) Confirmation : enregistrement réel, puis code
-    const { code, jourRetrait } = await enregistrerCommande(from, lignes, nom, contact, meta.id || null);
+    const code = await enregistrerCommande(from, lignes, nom, contact, meta.id || null);
 
     const utiliseProfil = !!profil && nom === profil.nom && contact === profil.contact && !nomChange && !telChange;
     const demanderAvis = !profil || ((profil.commandes || 0) + 1) % 5 === 0;
 
     await sauverProfil(from, nom, contact, true);
 
-    const demain = jourRetrait > dateJour();
-
     reponse = [
       `✅ Commande validée !\n\n` +
         `🔑 Votre code de livraison : ${code}\n` +
         lignes.map(l => `🍽️ ${ligneTexte(l)}`).join("\n") + "\n" +
+        (promoLignesTexte(lignes) ? promoLignesTexte(lignes) + "\n" : "") +
         `💰 Total : ${totalTexte(lignes)}\n` +
         `👤 ${nom}\n` +
-        `📞 ${contact}\n` +
-        `📅 Retrait : ${quandRetrait(jourRetrait)}\n\n` +
+        `📞 ${contact}\n\n` +
         (utiliseProfil
           ? `ℹ️ J'ai repris vos informations déjà enregistrées. Si elles ont changé, envoyez-moi simplement le nouveau nom ou numéro.\n\n`
           : "") +
         `Gardez bien ce code : il vous sera demandé à la livraison de votre commande 📦\n` +
-        (demain
-          ? `Votre commande a été prise après ${HEURE_LIMITE}h : elle sera prête *demain à ${HEURE_RAPPEL_TEXTE}*. Nous vous écrirons demain dès que votre repas est prêt.`
-          : `Nous vous écrirons à ${HEURE_RAPPEL_TEXTE} dès que votre repas est prêt.`),
+        `Nous vous écrirons à ${HEURE_RAPPEL_TEXTE} dès que votre repas est prêt.\n\n` +
+        BANNIERE_VALIDATION,
       `Merci pour votre confiance ${nom} 😊\n\n` +
         `Pour finir, que pensez-vous de Groupe Express ? ` +
         `Dites-nous en quelques mots votre avis sur nos plats et notre service 💬`
@@ -1541,7 +1393,6 @@ async function traiterMessage(from, texteBrut, meta = {}) {
     commandeValidee = true;
     panier = [];
     recap = false;
-    recapRetrait = null;
     nom = null;
     contact = null;
   } else {
@@ -1549,9 +1400,6 @@ async function traiterMessage(from, texteBrut, meta = {}) {
       decision.reponse && String(decision.reponse).trim()
         ? String(decision.reponse).trim()
         : null;
-
-    // Si seul le jour de retrait a changé, on ignore la réponse de l'IA (« parfait ! ») et on remontre le récapitulatif
-    if (retraitChange && !modifPanier && !nomChange && !telChange) dite = null;
 
     let ecartee = false;
 
@@ -1563,15 +1411,11 @@ async function traiterMessage(from, texteBrut, meta = {}) {
 
     if (lignes.length) {
       if (modif || !dite) {
-        // Le code construit le récapitulatif (prix, total et jour de retrait fiables)
+        // Le code construit le récapitulatif (prix et total fiables)
         const suite = recapEtSuite(lignes, nom, contact);
-        let prefixe = modif && dite && dite.length <= 200 ? dite + "\n\n" : "";
-        if (retraitChange) {
-          prefixe += `⏰ Il est maintenant passé ${HEURE_LIMITE}h : votre commande sera à récupérer *demain à ${HEURE_RAPPEL_TEXTE}*.\n\n`;
-        }
+        const prefixe = modif && dite && dite.length <= 200 ? dite + "\n\n" : "";
         reponse = prefixe + suite.texte;
         recap = suite.complet;
-        recapRetrait = suite.complet ? dateRetrait() : null;
       } else {
         reponse = dite;
       }
@@ -1627,49 +1471,35 @@ async function traiterMessage(from, texteBrut, meta = {}) {
     .join("\n\n");
 
   etat.hist.push({ r: "c", t: texte }, { r: "b", t: texteReponse.slice(0, 300) });
-  await ecrireEtat(from, { panier, recap, recapRetrait, nom, contact, avisAttendu, hist: etat.hist });
+  await ecrireEtat(from, { panier, recap, nom, contact, avisAttendu, hist: etat.hist });
 
   return reponse;
 }
 
 // ===============================
 // RAPPEL (appelé par index.js à 11h59)
-// Ne concerne que les commandes dont le jour de retrait est AUJOURD'HUI.
-// Les commandes passées après 11h (jourRetrait = demain) sont rappelées demain.
 // ===============================
 
 async function envoyerRappels() {
-  const jour = dateJour();
+  const snapshot = await firestore
+    .collection("commandes")
+    .where("jour", "==", dateJour())
+    .where("statut", "==", "en_attente")
+    .get();
 
-  const [parRetrait, parJour] = await Promise.all([
-    firestore.collection("commandes").where("jourRetrait", "==", jour).where("statut", "==", "en_attente").get(),
-    // Anciennes commandes (sans jourRetrait) : retrait le jour même
-    firestore.collection("commandes").where("jour", "==", jour).where("statut", "==", "en_attente").get()
-  ]);
+  if (snapshot.empty) return { clients: 0, envoyes: 0 };
 
   const parClient = new Map();
-  const vues = new Set();
 
-  const ajouter = doc => {
-    if (vues.has(doc.id)) return;
+  snapshot.forEach(doc => {
     const commande = doc.data();
-
-    // Passée aujourd'hui mais à récupérer demain : on n'y touche pas
-    if (commande.jourRetrait && commande.jourRetrait !== jour) return;
-
-    vues.add(doc.id);
 
     if (!parClient.has(commande.chatId)) {
       parClient.set(commande.chatId, []);
     }
 
     parClient.get(commande.chatId).push({ id: doc.id, ...commande });
-  };
-
-  parRetrait.forEach(ajouter);
-  parJour.forEach(ajouter);
-
-  if (!parClient.size) return { clients: 0, envoyes: 0 };
+  });
 
   const resultats = await Promise.allSettled(
     [...parClient.entries()].map(async ([chatId, commandes]) => {
@@ -1818,22 +1648,16 @@ function messageFournisseur(c, f, cfg, items) {
     .map(a => `🍽️ ${a.qte || 1} × ${a.nom}${a.precision ? ` (${a.precision})` : ""} - ${prixF((a.prix || 0) * (a.qte || 1))}`)
     .join("\n");
 
-  // Le fournisseur doit savoir pour quel jour préparer
-  const pourDemain = c.jourRetrait && c.jour && c.jourRetrait > c.jour;
-  const retrait = pourDemain
-    ? `📅 *À PRÉPARER POUR DEMAIN* (${c.jourRetrait}) - retrait à ${HEURE_RAPPEL_TEXTE}\n`
-    : `📅 À préparer pour aujourd'hui - retrait à ${HEURE_RAPPEL_TEXTE}\n`;
-
   return (
     `Bonjour ${f.nom} 👋\n\n` +
     `🛒 *Nouvelle commande Groupe Express*\n\n` +
     `🔑 Code : ${c.code || c.id}\n` +
     `${detail}\n` +
+    (Array.isArray(c.promos) && c.promos.length ? `🎁 Promo : ${c.promos.join(", ")} (total ${prixF(c.total || c.prix)})\n` : "") +
     `👤 Client : ${c.nom}\n` +
     (cfg.inclureContact && c.contact ? `📞 ${c.contact}\n` : "") +
-    `🕐 Commandé à ${heure}\n` +
-    retrait +
-    `\nMerci de préparer cette commande 🙏`
+    `🕐 ${heure}\n\n` +
+    `Merci de préparer cette commande 🙏`
   );
 }
 
